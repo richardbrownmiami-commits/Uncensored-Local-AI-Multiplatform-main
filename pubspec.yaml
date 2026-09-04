@@ -11,7 +11,7 @@ dependencies:
     sdk: flutter
 
   # ── LLM Engine ──────────────────────────────────────────────────
-  llamadart: ^0.2.0
+  llamadart: ^0.6.10
 
   # ── State Management ────────────────────────────────────────────
   get: ^4.7.2                      # GetX - controllers, routing, state
@@ -48,7 +48,7 @@ dev_dependencies:
     sdk: flutter
   hive_generator: ^2.0.1           # Hive type adapter code gen
   build_runner: ^2.4.13            # Code generation runner
-  flutter_lints: ^5.0.0
+  flutter_lints: ^6.0.0
 
 hooks:
   user_defines:
