@@ -29,10 +29,7 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         
-        // Enable ARMv7 (32-bit) support
-        ndk {
-            abiFilters.add("armeabi-v7a")
-        }
+
     }
 
     buildTypes {

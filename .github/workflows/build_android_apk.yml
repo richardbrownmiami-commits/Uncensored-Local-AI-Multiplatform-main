@@ -42,7 +42,7 @@ jobs:
         run: flutter pub get
 
       - name: Build APK for armeabi-v7a (32-bit)
-        run: flutter build apk --target-platform android-arm --split-per-abi
+        run: flutter build apk --target-platform android-arm
 
       - name: Rename APK
         run: |
