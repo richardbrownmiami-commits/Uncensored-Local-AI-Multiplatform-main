@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:llamadart/llamadart.dart';
 import 'package:path/path.dart' as p;
+import 'package:device_info_plus/device_info_plus.dart';
 
 import 'wakelock_service.dart';
 import 'chat_storage_service.dart';
@@ -73,9 +74,34 @@ class LlmService extends GetxService {
     final filename = p.basename(path);
     log?.info('Loading model: $filename', source: 'LLM');
 
+    // GGUF Magic Bytes Validation
+    // Check first 8 bytes for "GGUF" signature (GGUF format identifier)
+    loadingStatusMsg.value = 'Validating GGUF file...';
+    loadingProgress.value = 0.0;
+    try {
+      final randomAccess = await file.open(mode: FileMode.read);
+      final magicBytes = await randomAccess.read(8);
+      await randomAccess.close();
+      
+      if (magicBytes.length < 4 || String.fromCharCodes(magicBytes.sublist(0, 4)) != 'GGUF') {
+        log?.error('Invalid GGUF file: magic bytes mismatch', source: 'LLM');
+        throw Exception(
+          'Invalid GGUF file: "$filename". '
+          'File does not have valid GGUF format signature.',
+        );
+      }
+      log?.info('GGUF magic bytes validated', source: 'LLM');
+    } catch (e) {
+      log?.error('GGUF validation failed: $e', source: 'LLM');
+      throw Exception(
+        'Failed to validate GGUF file: "$filename". '
+        'Error: $e',
+      );
+    }
+
     _loadingCancelled = false;
     isLoadingModel.value = true;
-    loadingProgress.value = 0.0;
+    loadingProgress.value = 0.05;
     loadingStatusMsg.value = 'Preparing...';
 
     // Enable wake lock during model loading (heavy memory operation)
@@ -158,6 +184,42 @@ class LlmService extends GetxService {
 
       log?.info('Backend=$parsedBackend, GPU layers=$userGpuLayers, ctx=$contextSize, threads=${Platform.numberOfProcessors > 4 ? 4 : 0}', source: 'LLM');
 
+      // RAM Validation - Check if device has enough memory
+      // GGUF models need ~1.5x their file size in RAM
+      if (Platform.isAndroid || Platform.isIOS) {
+        loadingStatusMsg.value = 'Checking available RAM...';
+        loadingProgress.value = 0.15;
+        
+        try {
+          // Get total RAM on mobile devices
+          final deviceInfo = await DeviceInfoPlugin().deviceInfo;
+          double totalRamGb = 0;
+          if (deviceInfo is AndroidDeviceInfo) {
+            totalRamGb = deviceInfo.memTotalPhysicalBytes / (1024 * 1024 * 1024);
+          } else if (deviceInfo is IosDeviceInfo) {
+            totalRamGb = deviceInfo.physicalMemory / (1024 * 1024 * 1024);
+          }
+          
+          final fileSizeGb = fileSize / (1024 * 1024 * 1024);
+          final requiredRamGb = fileSizeGb * 1.5; // 1.5x multiplier for safety
+          
+          if (totalRamGb > 0 && requiredRamGb > totalRamGb * 0.7) {
+            // Use 70% of total RAM as threshold (leave room for OS)
+            log?.error('Insufficient RAM: need ${requiredRamGb.toStringAsFixed(1)}GB, have ${totalRamGb.toStringAsFixed(1)}GB', source: 'LLM');
+            throw Exception(
+              'Not enough RAM to load this model. '
+              'Model requires ~${requiredRamGb.toStringAsFixed(1)}GB, '
+              'device has ${totalRamGb.toStringAsFixed(1)}GB. '
+              'Try a smaller model.',
+            );
+          }
+          log?.info('RAM check passed: ${totalRamGb.toStringAsFixed(1)}GB available, ${requiredRamGb.toStringAsFixed(1)}GB required', source: 'LLM');
+        } catch (e) {
+          log?.warning('Could not determine device RAM: $e', source: 'LLM');
+          // Continue without RAM check if we can't get device info
+        }
+      }
+
       // Show loading progress - llamadart doesn't provide native progress callbacks
       // so we use a simple animated progress that properly reaches completion
       Timer? progressTimer;
@@ -173,7 +235,24 @@ class LlmService extends GetxService {
         }
       });
 
-      await _engine!.loadModel(path, modelParams: params);
+      // Load with timeout - 10 minutes maximum
+      loadingStatusMsg.value = 'Loading model into memory...';
+      loadingProgress.value = 0.2;
+      
+      try {
+        await _engine!.loadModel(path, modelParams: params).timeout(
+          const Duration(minutes: 10),
+          onTimeout: () {
+            throw TimeoutException(
+              'Model loading timed out after 10 minutes. '
+              'This model may be too large for your device or corrupted.',
+            );
+          },
+        );
+      } on TimeoutException catch (e) {
+        progressTimer.cancel();
+        throw Exception(e.message);
+      }
       progressTimer.cancel();
 
       if (_loadingCancelled) {
@@ -200,16 +279,50 @@ class LlmService extends GetxService {
       await _fullTeardown();
       log?.error('Model load failed: $e', source: 'LLM');
 
-      // Provide a clearer error message for common Android failures
-      if (Platform.isAndroid) {
-        final errStr = e.toString().toLowerCase();
-        if (errStr.contains('memory') || errStr.contains('alloc')) {
-          throw Exception(
-            'Not enough RAM to load this model. '
-            'Try a smaller model (e.g. Gemma 2 2B at 1.6 GB).',
-          );
-        }
+      final errStr = e.toString().toLowerCase();
+      
+      // Provide specific error messages for different failure types
+      if (errStr.contains('timeout') || errStr.contains('timed out')) {
+        throw Exception(
+          'Model loading timed out. '
+          'The model may be too large for your device, corrupted, or the file may be inaccessible. '
+          'Try a smaller model or check the file integrity.',
+        );
       }
+      
+      if (errStr.contains('memory') || errStr.contains('alloc') || errStr.contains('oom')) {
+        throw Exception(
+          'Not enough RAM to load this model. '
+          'This model requires more memory than your device has available. '
+          'Try a smaller model (e.g., Gemma 2 2B at ~1.6GB, Phi-3.5-mini at ~2.5GB).',
+        );
+      }
+      
+      if (errStr.contains('permission') || errStr.contains('access') || errStr.contains('selinux')) {
+        throw Exception(
+          'File access denied. '
+          'The app cannot access the model file. '
+          'On Android, try moving the file to the app\'s models directory or check file permissions.',
+        );
+      }
+      
+      if (errStr.contains('invalid') || errStr.contains('corrupt') || errStr.contains('magic')) {
+        throw Exception(
+          'Invalid or corrupted GGUF file. '
+          'The file "$filename" does not appear to be a valid GGUF model. '
+          'Try downloading the model again from a trusted source.',
+        );
+      }
+      
+      if (Platform.isAndroid && errStr.contains('signal 11') || errStr.contains('segfault')) {
+        throw Exception(
+          'Model loading crashed. '
+          'This may be due to insufficient memory or an incompatible model format. '
+          'Try a smaller model or restart the app.',
+        );
+      }
+      
+      // Generic fallback
       rethrow;
     } finally {
       _resetLoadingState();
