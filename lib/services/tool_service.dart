@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:device_info_plus/device_info_plus.dart';
-import 'package:clipboard/clipboard.dart';
 import 'package:http/http.dart' as http;
 
 import 'tool_parser.dart';
@@ -15,7 +14,6 @@ import 'log_service.dart';
 /// Handles file system operations, calculations, system info, clipboard, and web search.
 class ToolService extends GetxService {
   LogService? _log;
-  final _clipboard = FlutterClipboard();
 
   ToolService() {
     try {
@@ -367,7 +365,7 @@ class ToolService extends GetxService {
   /// Copy text to clipboard
   Future<String> _copyToClipboard(String text) async {
     try {
-      await _clipboard.write(text);
+      await Clipboard.setData(ClipboardData(text: text));
       return 'Copied to clipboard: ${text.length > 50 ? text.substring(0, 50) + '...' : text}';
     } catch (e) {
       throw Exception('Failed to copy to clipboard: $e');
