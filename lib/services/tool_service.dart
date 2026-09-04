@@ -367,7 +367,7 @@ class ToolService extends GetxService {
   /// Copy text to clipboard
   Future<String> _copyToClipboard(String text) async {
     try {
-      await _clipboard.copy(text);
+      await _clipboard.write(text);
       return 'Copied to clipboard: ${text.length > 50 ? text.substring(0, 50) + '...' : text}';
     } catch (e) {
       throw Exception('Failed to copy to clipboard: $e');
