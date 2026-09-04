@@ -14,7 +14,7 @@ import 'log_service.dart';
 /// Service for executing various tools requested by the AI model.
 /// Handles file system operations, calculations, system info, clipboard, and web search.
 class ToolService extends GetxService {
-  final LogService? _log;
+  LogService? _log;
   final _clipboard = FlutterClipboard.instance;
 
   ToolService() {
