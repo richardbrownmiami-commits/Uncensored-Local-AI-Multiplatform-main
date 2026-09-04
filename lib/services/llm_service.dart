@@ -195,8 +195,9 @@ class LlmService extends GetxService {
           final deviceInfo = await DeviceInfoPlugin().deviceInfo;
           double totalRamGb = 0;
           if (deviceInfo is AndroidDeviceInfo) {
-            // AndroidDeviceInfo uses memTotalKb (kilobytes) not memTotalPhysicalBytes
-            totalRamGb = (deviceInfo.memTotalKb ?? 0) / (1024 * 1024);
+            // Use memTotal which is in KB (kilobytes) for device_info_plus 10.x
+            // Convert KB to GB: KB / 1024 = MB, MB / 1024 = GB
+            totalRamGb = (deviceInfo.memTotal ?? 0) / (1024 * 1024);
           } else if (deviceInfo is IosDeviceInfo) {
             // IosDeviceInfo doesn't have physicalMemory, use a reasonable default for iOS
             // Most iOS devices have 4-8GB RAM
