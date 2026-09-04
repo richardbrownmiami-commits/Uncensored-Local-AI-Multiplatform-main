@@ -31,7 +31,7 @@ android {
         
         // Enable ARMv7 (32-bit) support
         ndk {
-            abiFilters = setOf("armeabi-v7a")
+            abiFilters = mutableSetOf("armeabi-v7a")
         }
     }
 
