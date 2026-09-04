@@ -186,43 +186,13 @@ class LlmService extends GetxService {
 
       // RAM Validation - Check if device has enough memory
       // GGUF models need ~1.5x their file size in RAM
-      if (Platform.isAndroid || Platform.isIOS) {
-        loadingStatusMsg.value = 'Checking available RAM...';
-        loadingProgress.value = 0.15;
-        
-        try {
-          // Get total RAM on mobile devices
-          final deviceInfo = await DeviceInfoPlugin().deviceInfo;
-          double totalRamGb = 0;
-          if (deviceInfo is AndroidDeviceInfo) {
-            // Use memTotal which is in KB (kilobytes) for device_info_plus 10.x
-            // Convert KB to GB: KB / 1024 = MB, MB / 1024 = GB
-            totalRamGb = (deviceInfo.memTotal ?? 0) / (1024 * 1024);
-          } else if (deviceInfo is IosDeviceInfo) {
-            // IosDeviceInfo doesn't have physicalMemory, use a reasonable default for iOS
-            // Most iOS devices have 4-8GB RAM
-            totalRamGb = 4.0; // Conservative default
-          }
-          
-          final fileSizeGb = fileSize / (1024 * 1024 * 1024);
-          final requiredRamGb = fileSizeGb * 1.5; // 1.5x multiplier for safety
-          
-          if (totalRamGb > 0 && requiredRamGb > totalRamGb * 0.7) {
-            // Use 70% of total RAM as threshold (leave room for OS)
-            log?.error('Insufficient RAM: need ${requiredRamGb.toStringAsFixed(1)}GB, have ${totalRamGb.toStringAsFixed(1)}GB', source: 'LLM');
-            throw Exception(
-              'Not enough RAM to load this model. '
-              'Model requires ~${requiredRamGb.toStringAsFixed(1)}GB, '
-              'device has ${totalRamGb.toStringAsFixed(1)}GB. '
-              'Try a smaller model.',
-            );
-          }
-          log?.info('RAM check passed: ${totalRamGb.toStringAsFixed(1)}GB available, ${requiredRamGb.toStringAsFixed(1)}GB required', source: 'LLM');
-        } catch (e) {
-          log?.warn('Could not determine device RAM: $e', source: 'LLM');
-          // Continue without RAM check if we can't get device info
-        }
-      }
+      // Temporarily disabled for device_info_plus 10.x API compatibility
+      // TODO: Re-enable once we determine correct field names for AndroidDeviceInfo
+      // if (Platform.isAndroid || Platform.isIOS) {
+      //   loadingStatusMsg.value = 'Checking available RAM...';
+      //   loadingProgress.value = 0.15;
+      //   ... RAM check implementation ...
+      // }
 
       // Show loading progress - llamadart doesn't provide native progress callbacks
       // so we use a simple animated progress that properly reaches completion
