@@ -31,6 +31,10 @@ dependencies:
   path: ^1.9.1                     # Path string utilities
   file_picker: ^8.1.7              # Cross-platform file/folder picker
 
+  # ── Tools & Utilities
+  device_info_plus: ^10.1.0        # Device information for system info tool
+  clipboard: ^0.1.3                # Clipboard access for copy tool
+
   # ── UI Helpers ───────────────────────────────────────────────────
   flutter_markdown: ^0.7.6         # Render AI markdown responses
   google_fonts: ^6.2.1             # Inter font (matching FastChatUI)
