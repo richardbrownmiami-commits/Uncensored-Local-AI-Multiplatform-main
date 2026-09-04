@@ -195,9 +195,12 @@ class LlmService extends GetxService {
           final deviceInfo = await DeviceInfoPlugin().deviceInfo;
           double totalRamGb = 0;
           if (deviceInfo is AndroidDeviceInfo) {
-            totalRamGb = deviceInfo.memTotalPhysicalBytes / (1024 * 1024 * 1024);
+            // AndroidDeviceInfo uses memTotalKb (kilobytes) not memTotalPhysicalBytes
+            totalRamGb = (deviceInfo.memTotalKb ?? 0) / (1024 * 1024);
           } else if (deviceInfo is IosDeviceInfo) {
-            totalRamGb = deviceInfo.physicalMemory / (1024 * 1024 * 1024);
+            // IosDeviceInfo doesn't have physicalMemory, use a reasonable default for iOS
+            // Most iOS devices have 4-8GB RAM
+            totalRamGb = 4.0; // Conservative default
           }
           
           final fileSizeGb = fileSize / (1024 * 1024 * 1024);
@@ -215,7 +218,7 @@ class LlmService extends GetxService {
           }
           log?.info('RAM check passed: ${totalRamGb.toStringAsFixed(1)}GB available, ${requiredRamGb.toStringAsFixed(1)}GB required', source: 'LLM');
         } catch (e) {
-          log?.warning('Could not determine device RAM: $e', source: 'LLM');
+          log?.warn('Could not determine device RAM: $e', source: 'LLM');
           // Continue without RAM check if we can't get device info
         }
       }
