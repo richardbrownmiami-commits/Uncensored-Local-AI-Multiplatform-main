@@ -1,0 +1,78 @@
+name: Build Android APK (armeabi-v7a)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          android-version: 34
+          build-tools-version: 34.0.0
+          ndk-version: 26.2.11394342
+          cmake-version: 3.22.1
+          accept-licenses: yes
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.1'
+          channel: 'stable'
+          cache: true
+
+      - name: Flutter Doctor
+        run: flutter doctor
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Build APK for armeabi-v7a (32-bit)
+        run: flutter build apk --target-platform android-arm --split-per-abi
+
+      - name: Rename APK
+        run: |
+          mv build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Uncensored-Local-AI-armeabi-v7a
+          path: build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
+          retention-days: 30
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          name: Uncensored Local AI v2.0.0 (armeabi-v7a)
+          tag_name: v2.0.0-armeabi-v7a
+          files: build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
+          body: |
+            Android 32-bit (armeabi-v7a) build of Uncensored Local AI.
+            
+            **Features:**
+            - Zero Censorship AI
+            - Fully Offline
+            - Local OpenAI API Server
+            - Model Library
+            - Chat History
+            
+            **Architecture:** armeabi-v7a (32-bit ARM)
+            **Target:** Older/budget Android phones
+            
+            **Note:** This build only supports 32-bit ARM devices.
