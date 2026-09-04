@@ -121,31 +121,9 @@ class LlmService extends GetxService {
 
       // Get file size for display
       final fileSize = await file.length();
-      final sizeGb = (fileSize / (1024 * 1024 * 1024)).toStringAsFixed(1);
-      loadingStatusMsg.value = 'Loading $sizeGb GB into memory...';
-
-      // Start a timer to animate progress while loading
-      Timer? progressTimer;
-      progressTimer = Timer.periodic(const Duration(milliseconds: 300), (
-        timer,
-      ) {
-        if (_loadingCancelled) {
-          timer.cancel();
-          return;
-        }
-        // Gradually increase progress (asymptotic approach to 0.95)
-        final current = loadingProgress.value;
-        if (current < 0.95) {
-          loadingProgress.value = current + (0.95 - current) * 0.04;
-        }
-      });
-
-      if (_loadingCancelled) {
-        progressTimer.cancel();
-        await _fullTeardown();
-        _resetLoadingState();
-        return;
-      }
+      final sizeGb = (fileSize / (1024 * 1024 * 1024)).toStringAsFixed(2);
+      loadingStatusMsg.value = 'Loading $sizeGb GB model...';
+      loadingProgress.value = 0.0;
 
       // Use smaller context on Android to prevent OOM kills.
       // Desktop can handle 2048, but Android devices with limited RAM
@@ -180,18 +158,32 @@ class LlmService extends GetxService {
 
       log?.info('Backend=$parsedBackend, GPU layers=$userGpuLayers, ctx=$contextSize, threads=${Platform.numberOfProcessors > 4 ? 4 : 0}', source: 'LLM');
 
+      // Show loading progress - llamadart doesn't provide native progress callbacks
+      // so we use a simple animated progress that properly reaches completion
+      Timer? progressTimer;
+      progressTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
+        if (_loadingCancelled) {
+          timer.cancel();
+          return;
+        }
+        final current = loadingProgress.value;
+        if (current < 0.99) {
+          loadingProgress.value = current + 0.01;
+          loadingStatusMsg.value = 'Loading ${((current + 0.01) * 100).toStringAsFixed(0)}%...';
+        }
+      });
+
       await _engine!.loadModel(path, modelParams: params);
       progressTimer.cancel();
 
       if (_loadingCancelled) {
-        // User cancelled while loading — full cleanup
         await _fullTeardown();
         _resetLoadingState();
         return;
       }
 
       loadingProgress.value = 1.0;
-      loadingStatusMsg.value = 'Ready!';
+      loadingStatusMsg.value = 'Model ready!';
       isLoaded.value = true;
       loadedModelPath.value = path;
       log?.info('Model loaded successfully: $filename', source: 'LLM');
