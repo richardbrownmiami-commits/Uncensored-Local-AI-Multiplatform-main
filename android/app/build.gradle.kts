@@ -28,6 +28,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        
+        // Enable ARMv7 (32-bit) support
+        ndk {
+            abiFilters = listOf("armeabi-v7a")
+        }
     }
 
     buildTypes {

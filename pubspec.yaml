@@ -55,9 +55,7 @@ hooks:
     llamadart:
       llamadart_native_backends:
         platforms:
-          linux-x64: [vulkan]
-          windows-x64: [vulkan]
-          android-arm64: [cpu, vulkan, opencl]
+          android-armeabi-v7a: [cpu]
 
 flutter:
   uses-material-design: true
