@@ -11,7 +11,8 @@ dependencies:
     sdk: flutter
 
   # ── LLM Engine ──────────────────────────────────────────────────
-  llamadart: ^0.6.10
+  # 0.6.13 includes the hardened local-model loading/cache lifecycle.
+  llamadart: ^0.6.13
 
   # ── State Management ────────────────────────────────────────────
   get: ^4.7.2                      # GetX - controllers, routing, state
