@@ -194,19 +194,16 @@ class LlmService extends GetxService {
       //   ... RAM check implementation ...
       // }
 
-      // Show loading progress - llamadart doesn't provide native progress callbacks
-      // so we use a simple animated progress that properly reaches completion
-      Timer? progressTimer;
-      progressTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
-        if (_loadingCancelled) {
-          timer.cancel();
-          return;
-        }
-        final current = loadingProgress.value;
-        if (current < 0.99) {
-          loadingProgress.value = current + 0.01;
-          loadingStatusMsg.value = 'Loading ${((current + 0.01) * 100).toStringAsFixed(0)}%...';
-        }
+      // llamadart does not expose native load progress here. Keep the UI at
+      // an honest loading value and show elapsed time instead of fabricating
+      // progress that always stops at 99%.
+      final loadStopwatch = Stopwatch()..start();
+      Timer? loadHeartbeat;
+      loadHeartbeat = Timer.periodic(const Duration(seconds: 2), (_) {
+        if (_loadingCancelled) return;
+        final seconds = loadStopwatch.elapsed.inSeconds;
+        loadingProgress.value = 0.20;
+        loadingStatusMsg.value = 'Loading $sizeGb GB model... ${seconds}s';
       });
 
       // Load with timeout - 10 minutes maximum
@@ -223,11 +220,10 @@ class LlmService extends GetxService {
             );
           },
         );
-      } on TimeoutException catch (e) {
-        progressTimer.cancel();
-        throw Exception(e.message);
+      } finally {
+        loadHeartbeat?.cancel();
+        loadStopwatch.stop();
       }
-      progressTimer.cancel();
 
       if (_loadingCancelled) {
         await _fullTeardown();
@@ -288,7 +284,7 @@ class LlmService extends GetxService {
         );
       }
       
-      if (Platform.isAndroid && errStr.contains('signal 11') || errStr.contains('segfault')) {
+      if (Platform.isAndroid && (errStr.contains('signal 11') || errStr.contains('segfault'))) {
         throw Exception(
           'Model loading crashed. '
           'This may be due to insufficient memory or an incompatible model format. '
