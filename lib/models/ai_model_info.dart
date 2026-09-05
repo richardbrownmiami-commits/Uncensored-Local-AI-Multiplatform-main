@@ -10,6 +10,7 @@ class AiModelInfo {
   final String badge;        // RECOMMENDED, HERETIC, etc.
   final String systemPrompt;
   final bool recommended;
+  final List<String> capabilities; // chat, tools, vision, image-input, etc.
 
   const AiModelInfo({
     required this.id,
@@ -22,6 +23,7 @@ class AiModelInfo {
     required this.badge,
     required this.systemPrompt,
     this.recommended = false,
+    this.capabilities = const <String>[],
   });
 
   factory AiModelInfo.fromJson(Map<String, dynamic> json) {
@@ -36,6 +38,10 @@ class AiModelInfo {
       badge: json['badge'] as String? ?? '',
       systemPrompt: json['systemPrompt'] as String? ?? '',
       recommended: json['recommended'] as bool? ?? false,
+      capabilities: (json['capabilities'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const <String>[],
     );
   }
 
@@ -50,6 +56,7 @@ class AiModelInfo {
         'badge': badge,
         'systemPrompt': systemPrompt,
         'recommended': recommended,
+        'capabilities': capabilities,
       };
 
   bool get isUncensored => label == 'UNCENSORED';
