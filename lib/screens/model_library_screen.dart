@@ -7,6 +7,7 @@ import '../controllers/model_controller.dart';
 import '../services/model_manager.dart';
 import '../models/ai_model_info.dart';
 import '../widgets/model_card.dart';
+import '../widgets/multimodal_test_card.dart';
 
 class ModelLibraryScreen extends StatelessWidget {
   final bool embedded;
@@ -97,6 +98,19 @@ class _ModelLibraryBodyState extends State<_ModelLibraryBody> {
             ],
           ),
         ),
+
+        // ── Featured multimodal test target ──────────
+        Obx(() {
+          final model = ctrl.catalog.firstWhereOrNull(
+            (m) => m.id == 'gemma-4-heretic',
+          );
+          if (model == null) return const SizedBox.shrink();
+          return MultimodalTestCard(
+            model: model,
+            controller: ctrl,
+            manager: manager,
+          );
+        }),
 
         // ── Body ─────────────────────────────────────
         Expanded(
