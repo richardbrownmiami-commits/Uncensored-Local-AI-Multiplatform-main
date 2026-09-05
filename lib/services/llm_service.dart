@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:llamadart/llamadart.dart';
 import 'package:path/path.dart' as p;
@@ -20,53 +19,49 @@ class LlmService extends GetxService {
   final lastGenerationTokens = 0.obs;
   final lastGenerationSpeed = 0.0.obs;
   final visionSupported = false.obs;
-
   final isLoadingModel = false.obs;
   final loadingProgress = 0.0.obs;
   final loadingStatusMsg = ''.obs;
   bool _loadingCancelled = false;
-
   StreamSubscription? _generateSub;
 
   String get loadedModelFilename => loadedModelPath.value.isEmpty ? '' : p.basename(loadedModelPath.value);
-
   String get publicModelId {
     final filename = loadedModelFilename;
     if (filename.isEmpty) return 'local';
-    final stem = filename.toLowerCase().endsWith('.gguf')
-        ? filename.substring(0, filename.length - 5)
-        : p.basenameWithoutExtension(filename);
+    final stem = filename.toLowerCase().endsWith('.gguf') ? filename.substring(0, filename.length - 5) : p.basenameWithoutExtension(filename);
     return stem.replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '-').replaceAll(RegExp(r'-+'), '-').replaceAll(RegExp(r'^-|-$'), '');
   }
-
   bool get isLiteRtLm => loadedModelFilename.toLowerCase().endsWith('.litertlm');
   Future<LlmService> init() async => this;
   void cancelLoading() => _loadingCancelled = true;
 
-  /// Loads both GGUF/llama.cpp models and native LiteRT-LM bundles.
   Future<void> loadModel(String path) async {
     LogService? log;
     try { log = Get.find<LogService>(); } catch (_) {}
-
     final file = File(path);
     if (!await file.exists()) throw Exception('Model file not found: $path');
     final filename = p.basename(path);
     final isLiteRt = filename.toLowerCase().endsWith('.litertlm');
-    log?.info('Loading model: $filename', source: 'LLM');
 
-    loadingStatusMsg.value = isLiteRt ? 'Validating LiteRT-LM bundle...' : 'Validating GGUF file...';
+    // llamadart 0.6.13 in this APK is GGUF/llama.cpp based. Do not pretend
+    // that a .litertlm file is loadable until a LiteRT-LM runtime is bundled.
+    if (isLiteRt) {
+      throw UnsupportedError('LiteRT-LM (.litertlm) is not supported by this Android build. Use a .gguf model.');
+    }
+
+    log?.info('Loading model: $filename', source: 'LLM');
+    loadingStatusMsg.value = 'Validating GGUF file...';
     loadingProgress.value = 0.0;
-    if (!isLiteRt) {
-      try {
-        final handle = await file.open(mode: FileMode.read);
-        final magic = await handle.read(8);
-        await handle.close();
-        if (magic.length < 4 || String.fromCharCodes(magic.sublist(0, 4)) != 'GGUF') {
-          throw Exception('File does not have valid GGUF format signature.');
-        }
-      } catch (e) {
-        throw Exception('Invalid or corrupted GGUF file: "$filename". Error: $e');
+    try {
+      final handle = await file.open(mode: FileMode.read);
+      final magic = await handle.read(8);
+      await handle.close();
+      if (magic.length < 4 || String.fromCharCodes(magic.sublist(0, 4)) != 'GGUF') {
+        throw Exception('File does not have valid GGUF format signature.');
       }
+    } catch (e) {
+      throw Exception('Invalid or corrupted GGUF file: "$filename". Error: $e');
     }
 
     _loadingCancelled = false;
@@ -79,7 +74,7 @@ class LlmService extends GetxService {
     if (_engine != null || isLoaded.value) {
       loadingStatusMsg.value = 'Unloading previous model...';
       await _fullTeardown();
-      await Future.delayed(const Duration(milliseconds: 500));
+      await Future.delayed(const Duration(milliseconds: 300));
       if (_loadingCancelled) { _resetLoadingState(); return; }
     }
 
@@ -96,7 +91,12 @@ class LlmService extends GetxService {
     try {
       final fileSize = await file.length();
       final sizeGb = (fileSize / (1024 * 1024 * 1024)).toStringAsFixed(2);
-      final contextSize = Platform.isAndroid ? 1024 : 2048;
+      final androidSafeMode = Platform.isAndroid;
+      final contextSize = androidSafeMode ? 512 : 2048;
+      final threads = androidSafeMode ? 2 : (Platform.numberOfProcessors > 4 ? 4 : 0);
+
+      // The published APK is CPU-only for Android armeabi-v7a. Never reuse
+      // persisted Vulkan/OpenCL settings or GPU layers on that target.
       final storage = Get.find<ChatStorageService>();
       GpuBackend parsedBackend;
       switch (storage.backendType) {
@@ -104,18 +104,15 @@ class LlmService extends GetxService {
         case 'opencl': parsedBackend = GpuBackend.opencl; break;
         default: parsedBackend = GpuBackend.cpu;
       }
-      final gpuLayers = storage.gpuLayers;
-      final threads = Platform.numberOfProcessors > 4 ? 4 : 0;
-      final params = isLiteRt
-          ? ModelParams(numberOfThreads: threads)
-          : ModelParams(
-              contextSize: contextSize,
-              gpuLayers: gpuLayers,
-              preferredBackend: parsedBackend,
-              numberOfThreads: threads,
-              numberOfThreadsBatch: threads,
-            );
+      final params = ModelParams(
+        contextSize: contextSize,
+        gpuLayers: androidSafeMode ? 0 : storage.gpuLayers,
+        preferredBackend: androidSafeMode ? GpuBackend.cpu : parsedBackend,
+        numberOfThreads: threads,
+        numberOfThreadsBatch: threads,
+      );
 
+      log?.info('Runtime config: android=$androidSafeMode cpu=${androidSafeMode ? 'forced' : 'auto'} context=$contextSize threads=$threads gpuLayers=${params.gpuLayers}', source: 'LLM');
       final loadStopwatch = Stopwatch()..start();
       late final Timer loadHeartbeat;
       loadHeartbeat = Timer.periodic(const Duration(seconds: 2), (_) {
@@ -135,32 +132,26 @@ class LlmService extends GetxService {
 
       if (_loadingCancelled) { await _fullTeardown(); _resetLoadingState(); return; }
 
-      // For GGUF vision models, automatically use a matching mmproj sitting
-      // beside the model. Never advertise vision without a runtime check.
       visionSupported.value = false;
-      if (isLiteRt) {
-        try { visionSupported.value = await _engine!.supportsVision; } catch (_) {}
-      } else {
-        final files = await file.parent.list().whereType<File>().toList();
-        final stem = p.basenameWithoutExtension(filename).toLowerCase();
-        final named = files.where((f) {
-          final n = p.basename(f.path).toLowerCase();
-          return n.contains('mmproj') && n.endsWith('.gguf') && (n.contains('qwen3.5') || n.contains(stem));
-        }).toList();
-        final generic = files.where((f) {
-          final n = p.basename(f.path).toLowerCase();
-          return n.contains('mmproj') && n.endsWith('.gguf');
-        }).toList();
-        final candidates = named.isNotEmpty ? named : (generic.length == 1 ? generic : <File>[]);
-        if (candidates.isNotEmpty) {
-          try {
-            loadingStatusMsg.value = 'Loading vision projector...';
-            await _engine!.loadMultimodalProjector(candidates.first.path);
-            visionSupported.value = await _engine!.supportsVision;
-            log?.info('Vision projector loaded: ${p.basename(candidates.first.path)}', source: 'LLM');
-          } catch (e) {
-            log?.error('Vision projector unavailable: $e', source: 'LLM');
-          }
+      final files = await file.parent.list().whereType<File>().toList();
+      final stem = p.basenameWithoutExtension(filename).toLowerCase();
+      final named = files.where((f) {
+        final n = p.basename(f.path).toLowerCase();
+        return n.contains('mmproj') && n.endsWith('.gguf') && (n.contains('qwen3.5') || n.contains(stem));
+      }).toList();
+      final generic = files.where((f) {
+        final n = p.basename(f.path).toLowerCase();
+        return n.contains('mmproj') && n.endsWith('.gguf');
+      }).toList();
+      final candidates = named.isNotEmpty ? named : (generic.length == 1 ? generic : <File>[]);
+      if (candidates.isNotEmpty) {
+        try {
+          loadingStatusMsg.value = 'Loading vision projector...';
+          await _engine!.loadMultimodalProjector(candidates.first.path);
+          visionSupported.value = await _engine!.supportsVision;
+          log?.info('Vision projector loaded: ${p.basename(candidates.first.path)}', source: 'LLM');
+        } catch (e) {
+          log?.error('Vision projector unavailable: $e', source: 'LLM');
         }
       }
 
@@ -177,9 +168,9 @@ class LlmService extends GetxService {
       await _fullTeardown();
       final err = e.toString().toLowerCase();
       if (err.contains('memory') || err.contains('alloc') || err.contains('oom')) throw Exception('Not enough RAM to load this model. Try a smaller model.');
-      if (err.contains('permission') || err.contains('access') || err.contains('selinux')) throw Exception('File access denied. Move the model into the app models directory and try again.');
-      if (err.contains('timeout') || err.contains('timed out')) throw Exception('Model loading timed out. Try a smaller model or check the file integrity.');
-      if (Platform.isAndroid && (err.contains('signal 11') || err.contains('segfault'))) throw Exception('Model loading crashed. This may be insufficient memory or an incompatible model format.');
+      if (err.contains('permission') || err.contains('access') || err.contains('selinux')) throw Exception('File access denied. Import the model through the app and try again.');
+      if (err.contains('timeout') || err.contains('timed out')) throw Exception('Model loading timed out. Try SmolLM2-135M first and check the model file.');
+      if (Platform.isAndroid && (err.contains('signal 11') || err.contains('segfault'))) throw Exception('Native model loader crashed. Android CPU mode is forced; try SmolLM2-135M to separate runtime problems from model size.');
       rethrow;
     } finally {
       _resetLoadingState();
@@ -259,18 +250,6 @@ class LlmService extends GetxService {
       lastGenerationSpeed.value = tokensPerSecond.value;
       isGenerating.value = false;
     }
-  }
-
-  Stream<String> generateMultimodalCompletion({required List<LlamaChatMessage> messages, required String imagePath, String prompt = 'Describe this image.', GenerationParams params = const GenerationParams()}) async* {
-    if (_engine == null || !isLoaded.value) throw StateError('No model loaded.');
-    if (!visionSupported.value) throw StateError('Vision is not available. Add a matching mmproj file for GGUF vision models.');
-    if (isGenerating.value) throw StateError('Another generation is already in progress.');
-    final multimodalMessages = <LlamaChatMessage>[...messages];
-    multimodalMessages.add(LlamaChatMessage.withContent(
-      role: LlamaChatRole.user,
-      content: [LlamaImageContent(path: imagePath), LlamaTextContent(prompt)],
-    ));
-    yield* generateChatCompletion(messages: multimodalMessages, params: params);
   }
 
   Future<int> countTokens(String text) async {
