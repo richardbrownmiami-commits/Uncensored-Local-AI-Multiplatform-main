@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:get/get.dart';
-import 'package:llamadart/llamadart.dart';
 
 import '../models/chat_model.dart';
 import '../models/message_model.dart';
@@ -61,14 +60,12 @@ class ChatController extends GetxController {
     if (activeChatId.value == id) activeChatId.value = chats.isNotEmpty ? chats.first.id : null;
   }
 
-  /// Sends normal text or a multimodal image+text turn.
-  Future<void> sendMessage(String text, {String? modelFilename, String? imagePath}) async {
-    if (text.trim().isEmpty && imagePath == null) return;
+  Future<void> sendMessage(String text, {String? modelFilename}) async {
+    if (text.trim().isEmpty) return;
     final chat = activeChat;
     if (chat == null) return;
 
-    final userContent = text.trim().isEmpty ? '🖼️ Image attached' : text.trim();
-    final userMsg = MessageModel(role: MessageRole.user, content: userContent);
+    final userMsg = MessageModel(role: MessageRole.user, content: text.trim());
     chat.messages.add(userMsg);
     chat.autoTitle();
     chat.updatedAt = DateTime.now();
@@ -76,11 +73,7 @@ class ChatController extends GetxController {
     _storage.saveChat(chat);
     chats.refresh();
 
-    final history = chat.messages
-        .where((m) => !m.isSystem)
-        .map((m) => m.toLlamaMessage())
-        .toList();
-
+    final history = chat.messages.where((m) => !m.isSystem).map((m) => m.toLlamaMessage()).toList();
     isGenerating.value = true;
     streamedResponse.value = '';
     final aiMsg = MessageModel(role: MessageRole.assistant, content: '');
@@ -90,37 +83,12 @@ class ChatController extends GetxController {
     try {
       final baseSystemPrompt = chat.systemPrompt.isNotEmpty ? chat.systemPrompt : systemPrompt.value;
       final toolInstructions = toolsEnabled.value && (_github.isConfigured || _hasLocalTools)
-          ? '\n\n${ToolParser.toolInstructions}'
-          : '';
-      final effectiveSystemPrompt = '$baseSystemPrompt$toolInstructions';
-
-      late final Stream<String> stream;
-      if (imagePath != null) {
-        // Image turns use the typed llamadart content API. The persisted
-        // current user text is excluded because the multimodal method adds
-        // the image+prompt as the actual current turn.
-        final visionHistory = <LlamaChatMessage>[
-          if (effectiveSystemPrompt.isNotEmpty)
-            LlamaChatMessage.fromText(role: LlamaChatRole.system, text: effectiveSystemPrompt),
-          ...chat.messages
-              .where((m) => !m.isSystem && m != userMsg && m != aiMsg)
-              .map((m) => LlamaChatMessage.fromText(
-                    role: m.isUser ? LlamaChatRole.user : LlamaChatRole.assistant,
-                    text: m.content,
-                  )),
-        ];
-        stream = _llm.generateMultimodalCompletion(
-          messages: visionHistory,
-          imagePath: imagePath,
-          prompt: text.trim().isEmpty ? 'Describe this image.' : text.trim(),
-        );
-      } else {
-        stream = _llm.generate(
-          messages: history,
-          systemPrompt: effectiveSystemPrompt,
-          temperature: temperature.value,
-        );
-      }
+          ? '\n\n${ToolParser.toolInstructions}' : '';
+      final stream = _llm.generate(
+        messages: history,
+        systemPrompt: '$baseSystemPrompt$toolInstructions',
+        temperature: temperature.value,
+      );
 
       await for (final token in stream) {
         streamedResponse.value += token;
@@ -130,13 +98,8 @@ class ChatController extends GetxController {
     } catch (e) {
       if (aiMsg.content.isEmpty) aiMsg.content = '⚠ Error: ${e.toString()}';
     } finally {
-      aiMsg.content = aiMsg.content
-          .replaceAll(RegExp(
-            r'<\|end\|>|<\|eot_id\|>|<\|endoftext\|>|<\|im_end\|>|<\|im_start\|>'
-            r'|<end_of_turn>|<start_of_turn>|<\|assistant\|>|<\|user\|>|<\|system\|>'
-            r'|<\|pad\|>|</s>|<s>|\[INST\]|\[/INST\]|\[end\]'
-          ), '')
-          .trim();
+      aiMsg.content = aiMsg.content.replaceAll(RegExp(
+        r'<\|end\|>|<\|eot_id\|>|<\|endoftext\|>|<\|im_end\|>|<\|im_start\|>|<end_of_turn>|<start_of_turn>|<\|assistant\|>|<\|user\|>|<\|system\|>|<\|pad\|>|</s>|<s>|\[INST\]|\[/INST\]|\[end\]'), '').trim();
 
       if (toolsEnabled.value) {
         final request = ToolParser.parse(aiMsg.content);
@@ -152,18 +115,14 @@ class ChatController extends GetxController {
               try {
                 final fileContent = await _github.readFile(request.path!);
                 aiMsg.content += '\n\n---\n**GitHub ${request.path}:**\n```\n$fileContent\n```';
-              } catch (e) {
-                aiMsg.content += '\n\n⚠ Could not read GitHub file: $e';
-              }
+              } catch (e) { aiMsg.content += '\n\n⚠ Could not read GitHub file: $e'; }
               break;
             case ToolKind.githubListIssues:
               try {
                 final issues = await _github.listIssues();
                 final summary = issues.isEmpty ? 'No open issues.' : issues.map((i) => '- #${i['number']}: ${i['title']}').join('\n');
                 aiMsg.content += '\n\n---\n**GitHub Open Issues:**\n$summary';
-              } catch (e) {
-                aiMsg.content += '\n\n⚠ Could not list GitHub issues: $e';
-              }
+              } catch (e) { aiMsg.content += '\n\n⚠ Could not list GitHub issues: $e'; }
               break;
             default:
               break;
@@ -174,9 +133,7 @@ class ChatController extends GetxController {
           try {
             final result = await _toolService.executeTool(request);
             if (result != null && result.isNotEmpty) aiMsg.content += '\n\n---\n**Tool Result:**\n$result';
-          } catch (e) {
-            aiMsg.content += '\n\n⚠ Tool error: $e';
-          }
+          } catch (e) { aiMsg.content += '\n\n⚠ Tool error: $e'; }
         } else if (request.requiresConfirmation) {
           pendingAction.value = request;
         }
@@ -204,9 +161,7 @@ class ChatController extends GetxController {
         return null;
       }
       return null;
-    } catch (e) {
-      return e.toString();
-    }
+    } catch (e) { return e.toString(); }
   }
 
   void rejectPendingAction() => pendingAction.value = null;
