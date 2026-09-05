@@ -4,13 +4,13 @@ import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:llamadart/llamadart.dart';
 import 'package:path/path.dart' as p;
-import 'package:device_info_plus/device_info_plus.dart';
 
 import 'wakelock_service.dart';
 import 'chat_storage_service.dart';
 import 'log_service.dart';
 
-/// Wraps llamadart's LlamaEngine for model loading, generation, and lifecycle.
+/// Wraps llamadart's LlamaEngine for model loading, generation, lifecycle,
+/// and the local multimodal path used by supported GGUF/LiteRT-LM models.
 class LlmService extends GetxService {
   LlamaEngine? _engine;
   LlamaBackend? _backend;
@@ -21,10 +21,10 @@ class LlmService extends GetxService {
   final tokensPerSecond = 0.0.obs;
   final lastGenerationTokens = 0.obs;
   final lastGenerationSpeed = 0.0.obs;
+  final visionSupported = false.obs;
 
-  // ── Loading progress tracking ──────────────────────────────
   final isLoadingModel = false.obs;
-  final loadingProgress = 0.0.obs; // 0.0 to 1.0
+  final loadingProgress = 0.0.obs;
   final loadingStatusMsg = ''.obs;
   bool _loadingCancelled = false;
 
@@ -48,23 +48,19 @@ class LlmService extends GetxService {
         .replaceAll(RegExp(r'^-|-$'), '');
   }
 
-  /// Initialize the service.
-  Future<LlmService> init() async {
-    // Backend is created fresh per loadModel() call — no init needed here
-    return this;
-  }
+  bool get isLiteRtLm => loadedModelFilename.toLowerCase().endsWith('.litertlm');
 
-  /// Cancel an in-progress model load.
-  void cancelLoading() {
-    _loadingCancelled = true;
-  }
+  Future<LlmService> init() async => this;
 
-  /// Load a GGUF model from [path] with progress tracking.
+  void cancelLoading() => _loadingCancelled = true;
+
+  /// Load either a GGUF model or a native LiteRT-LM bundle.
+  /// GGUF files are validated by magic bytes; LiteRT-LM bundles are passed
+  /// directly to llamadart's runtime router.
   Future<void> loadModel(String path) async {
     LogService? log;
     try { log = Get.find<LogService>(); } catch (_) {}
 
-    // Verify file exists first
     final file = File(path);
     if (!await file.exists()) {
       log?.error('Model file not found: $path', source: 'LLM');
@@ -72,31 +68,26 @@ class LlmService extends GetxService {
     }
 
     final filename = p.basename(path);
+    final lowerFilename = filename.toLowerCase();
+    final isLiteRt = lowerFilename.endsWith('.litertlm');
     log?.info('Loading model: $filename', source: 'LLM');
 
-    // GGUF Magic Bytes Validation
-    // Check first 8 bytes for "GGUF" signature (GGUF format identifier)
-    loadingStatusMsg.value = 'Validating GGUF file...';
+    loadingStatusMsg.value = isLiteRt ? 'Validating LiteRT-LM bundle...' : 'Validating GGUF file...';
     loadingProgress.value = 0.0;
-    try {
-      final randomAccess = await file.open(mode: FileMode.read);
-      final magicBytes = await randomAccess.read(8);
-      await randomAccess.close();
-      
-      if (magicBytes.length < 4 || String.fromCharCodes(magicBytes.sublist(0, 4)) != 'GGUF') {
-        log?.error('Invalid GGUF file: magic bytes mismatch', source: 'LLM');
-        throw Exception(
-          'Invalid GGUF file: "$filename". '
-          'File does not have valid GGUF format signature.',
-        );
+
+    if (!isLiteRt) {
+      try {
+        final randomAccess = await file.open(mode: FileMode.read);
+        final magicBytes = await randomAccess.read(8);
+        await randomAccess.close();
+        if (magicBytes.length < 4 ||
+            String.fromCharCodes(magicBytes.sublist(0, 4)) != 'GGUF') {
+          throw Exception('File does not have valid GGUF format signature.');
+        }
+      } catch (e) {
+        log?.error('GGUF validation failed: $e', source: 'LLM');
+        throw Exception('Invalid or corrupted GGUF file: "$filename". Error: $e');
       }
-      log?.info('GGUF magic bytes validated', source: 'LLM');
-    } catch (e) {
-      log?.error('GGUF validation failed: $e', source: 'LLM');
-      throw Exception(
-        'Failed to validate GGUF file: "$filename". '
-        'Error: $e',
-      );
     }
 
     _loadingCancelled = false;
@@ -104,18 +95,12 @@ class LlmService extends GetxService {
     loadingProgress.value = 0.05;
     loadingStatusMsg.value = 'Preparing...';
 
-    // Enable wake lock during model loading (heavy memory operation)
     WakelockService? wakelockService;
-    try {
-      wakelockService = Get.find<WakelockService>();
-    } catch (_) {}
+    try { wakelockService = Get.find<WakelockService>(); } catch (_) {}
 
-    // Unload previous if any — MUST fully tear down engine + backend
     if (_engine != null || isLoaded.value) {
       loadingStatusMsg.value = 'Unloading previous model...';
-      loadingProgress.value = 0.05;
       await _fullTeardown();
-      // Give native side time to release resources
       await Future.delayed(const Duration(milliseconds: 500));
       if (_loadingCancelled) {
         _resetLoadingState();
@@ -123,9 +108,6 @@ class LlmService extends GetxService {
       }
     }
 
-    // Fresh backend + engine for every load — prevents stale native state
-    // Wrapped in try-catch to handle SELinux crashes on Android where
-    // ggml_backend_load_all() attempts to scan '/' which is denied.
     try {
       _backend = LlamaBackend();
       _engine = LlamaEngine(_backend!);
@@ -133,31 +115,15 @@ class LlmService extends GetxService {
       _backend = null;
       _engine = null;
       _resetLoadingState();
-      log?.error('Engine init failed: $e', source: 'LLM');
-      throw Exception(
-        'Failed to initialize AI engine. '
-        'This may be a device compatibility issue. '
-        'Error: $e',
-      );
+      throw Exception('Failed to initialize AI engine. Error: $e');
     }
 
     try {
-      loadingStatusMsg.value = 'Loading into memory...';
-      loadingProgress.value = 0.1;
-
-      // Get file size for display
       final fileSize = await file.length();
       final sizeGb = (fileSize / (1024 * 1024 * 1024)).toStringAsFixed(2);
-      loadingStatusMsg.value = 'Loading $sizeGb GB model...';
-      loadingProgress.value = 0.0;
-
-      // Use smaller context on Android to prevent OOM kills.
-      // Desktop can handle 2048, but Android devices with limited RAM
-      // need 1024 to avoid the Low Memory Killer (LMK).
       final contextSize = Platform.isAndroid ? 1024 : 2048;
-
-      // Map the string backend to GpuBackend enum
       final storage = Get.find<ChatStorageService>();
+
       GpuBackend parsedBackend;
       switch (storage.backendType) {
         case 'vulkan':
@@ -170,58 +136,45 @@ class LlmService extends GetxService {
           parsedBackend = GpuBackend.cpu;
       }
 
-      // Read gpu layers
       final userGpuLayers = storage.gpuLayers;
+      final threads = Platform.numberOfProcessors > 4 ? 4 : 0;
 
-      // Optimize threads: 4 for both generation and batch processing to keep memory stable.
-      final params = ModelParams(
-        contextSize: contextSize,
-        gpuLayers: userGpuLayers, 
-        preferredBackend: parsedBackend,
-        numberOfThreads: Platform.numberOfProcessors > 4 ? 4 : 0, 
-        numberOfThreadsBatch: Platform.numberOfProcessors > 4 ? 4 : 0,
+      // LiteRT-LM uses its own runtime backend selection. Do not pass
+      // llama.cpp-only GPU-layer/backend controls to a .litertlm bundle.
+      final params = isLiteRt
+          ? ModelParams(numberOfThreads: threads)
+          : ModelParams(
+              contextSize: contextSize,
+              gpuLayers: userGpuLayers,
+              preferredBackend: parsedBackend,
+              numberOfThreads: threads,
+              numberOfThreadsBatch: threads,
+            );
+
+      log?.info(
+        'Model format=${isLiteRt ? 'LiteRT-LM' : 'GGUF'}, backend=$parsedBackend, '
+        'GPU layers=${isLiteRt ? 'runtime-managed' : userGpuLayers}, '
+        'ctx=${isLiteRt ? 'runtime-managed' : contextSize}, threads=$threads',
+        source: 'LLM',
       );
 
-      log?.info('Backend=$parsedBackend, GPU layers=$userGpuLayers, ctx=$contextSize, threads=${Platform.numberOfProcessors > 4 ? 4 : 0}', source: 'LLM');
-
-      // RAM Validation - Check if device has enough memory
-      // GGUF models need ~1.5x their file size in RAM
-      // Temporarily disabled for device_info_plus 10.x API compatibility
-      // TODO: Re-enable once we determine correct field names for AndroidDeviceInfo
-      // if (Platform.isAndroid || Platform.isIOS) {
-      //   loadingStatusMsg.value = 'Checking available RAM...';
-      //   loadingProgress.value = 0.15;
-      //   ... RAM check implementation ...
-      // }
-
-      // llamadart does not expose native load progress here. Keep the UI at
-      // an honest loading value and show elapsed time instead of fabricating
-      // progress that always stops at 99%.
       final loadStopwatch = Stopwatch()..start();
       Timer? loadHeartbeat;
       loadHeartbeat = Timer.periodic(const Duration(seconds: 2), (_) {
         if (_loadingCancelled) return;
-        final seconds = loadStopwatch.elapsed.inSeconds;
         loadingProgress.value = 0.20;
-        loadingStatusMsg.value = 'Loading $sizeGb GB model... ${seconds}s';
+        loadingStatusMsg.value = 'Loading $sizeGb GB model... ${loadStopwatch.elapsed.inSeconds}s';
       });
 
-      // Load with timeout - 10 minutes maximum
-      loadingStatusMsg.value = 'Loading model into memory...';
-      loadingProgress.value = 0.2;
-      
       try {
         await _engine!.loadModel(path, modelParams: params).timeout(
           const Duration(minutes: 10),
-          onTimeout: () {
-            throw TimeoutException(
-              'Model loading timed out after 10 minutes. '
-              'This model may be too large for your device or corrupted.',
-            );
-          },
+          onTimeout: () => throw TimeoutException(
+            'Model loading timed out after 10 minutes. The model may be too large for your device or corrupted.',
+          ),
         );
       } finally {
-        loadHeartbeat?.cancel();
+        loadHeartbeat.cancel();
         loadStopwatch.stop();
       }
 
@@ -231,68 +184,78 @@ class LlmService extends GetxService {
         return;
       }
 
+      // GGUF vision models need a matching mmproj file. Look for one beside
+      // the model; never pretend vision works merely because the filename says
+      // "vision". LiteRT-LM bundles use their native media path instead.
+      visionSupported.value = false;
+      if (isLiteRt) {
+        try { visionSupported.value = await _engine!.supportsVision; } catch (_) {}
+      } else {
+        final modelDir = file.parent;
+        final files = await modelDir.list().whereType<File>().toList();
+        final modelStem = p.basenameWithoutExtension(filename).toLowerCase();
+        final projector = files.where((candidate) {
+          final n = p.basename(candidate.path).toLowerCase();
+          if (!n.contains('mmproj') || !n.endsWith('.gguf')) return false;
+          // Prefer projectors that name this model family; allow a generic
+          // mmproj only when there is exactly one projector in the directory.
+          return n.contains('qwen3.5') || n.contains(modelStem);
+        }).toList();
+        final genericProjectors = files.where((candidate) {
+          final n = p.basename(candidate.path).toLowerCase();
+          return n.contains('mmproj') && n.endsWith('.gguf');
+        }).toList();
+        final candidates = projector.isNotEmpty
+            ? projector
+            : genericProjectors.length == 1 ? genericProjectors : <File>[];
+
+        if (candidates.isNotEmpty) {
+          try {
+            loadingStatusMsg.value = 'Loading vision projector...';
+            await _engine!.loadMultimodalProjector(candidates.first.path);
+            visionSupported.value = await _engine!.supportsVision;
+            log?.info(
+              'Vision projector loaded: ${p.basename(candidates.first.path)}; supportsVision=${visionSupported.value}',
+              source: 'LLM',
+            );
+          } catch (e) {
+            visionSupported.value = false;
+            log?.error('Vision projector unavailable: $e', source: 'LLM');
+          }
+        }
+      }
+
       loadingProgress.value = 1.0;
-      loadingStatusMsg.value = 'Model ready!';
+      loadingStatusMsg.value = visionSupported.value ? 'Model ready · Vision ready!' : 'Model ready!';
       isLoaded.value = true;
       loadedModelPath.value = path;
       log?.info('Model loaded successfully: $filename', source: 'LLM');
 
-      // Enable wake lock for inference on mobile (keeps app from being killed)
-      final modelName = p.basenameWithoutExtension(path);
-      await wakelockService?.enableForInference(modelName: modelName);
-
-      // Brief delay to show 100%
+      await wakelockService?.enableForInference(modelName: p.basenameWithoutExtension(path));
       await Future.delayed(const Duration(milliseconds: 300));
     } catch (e) {
       isLoaded.value = false;
       loadedModelPath.value = '';
+      visionSupported.value = false;
       await _fullTeardown();
       log?.error('Model load failed: $e', source: 'LLM');
 
       final errStr = e.toString().toLowerCase();
-      
-      // Provide specific error messages for different failure types
       if (errStr.contains('timeout') || errStr.contains('timed out')) {
-        throw Exception(
-          'Model loading timed out. '
-          'The model may be too large for your device, corrupted, or the file may be inaccessible. '
-          'Try a smaller model or check the file integrity.',
-        );
+        throw Exception('Model loading timed out. Try a smaller model or check the file integrity.');
       }
-      
       if (errStr.contains('memory') || errStr.contains('alloc') || errStr.contains('oom')) {
-        throw Exception(
-          'Not enough RAM to load this model. '
-          'This model requires more memory than your device has available. '
-          'Try a smaller model (e.g., Gemma 2 2B at ~1.6GB, Phi-3.5-mini at ~2.5GB).',
-        );
+        throw Exception('Not enough RAM to load this model. Try a smaller model.');
       }
-      
       if (errStr.contains('permission') || errStr.contains('access') || errStr.contains('selinux')) {
-        throw Exception(
-          'File access denied. '
-          'The app cannot access the model file. '
-          'On Android, try moving the file to the app\'s models directory or check file permissions.',
-        );
+        throw Exception('File access denied. Move the model into the app models directory and try again.');
       }
-      
       if (errStr.contains('invalid') || errStr.contains('corrupt') || errStr.contains('magic')) {
-        throw Exception(
-          'Invalid or corrupted GGUF file. '
-          'The file "$filename" does not appear to be a valid GGUF model. '
-          'Try downloading the model again from a trusted source.',
-        );
+        throw Exception('Invalid or corrupted model file: "$filename".');
       }
-      
       if (Platform.isAndroid && (errStr.contains('signal 11') || errStr.contains('segfault'))) {
-        throw Exception(
-          'Model loading crashed. '
-          'This may be due to insufficient memory or an incompatible model format. '
-          'Try a smaller model or restart the app.',
-        );
+        throw Exception('Model loading crashed. This may be insufficient memory or an incompatible model format.');
       }
-      
-      // Generic fallback
       rethrow;
     } finally {
       _resetLoadingState();
@@ -306,110 +269,57 @@ class LlmService extends GetxService {
     _loadingCancelled = false;
   }
 
-  /// Tokens/patterns the model may emit that should be stripped from output.
-  /// Covers ChatML, Llama, Gemma, Phi, Mistral, and other common formats.
   static final _stopPatterns = RegExp(
-    r'<\|end\|>'
-    r'|<\|eot_id\|>'
-    r'|<\|endoftext\|>'
-    r'|<\|im_end\|>'
-    r'|<\|im_start\|>'
-    r'|<end_of_turn>'
-    r'|<start_of_turn>'
-    r'|<\|assistant\|>'
-    r'|<\|user\|>'
-    r'|<\|system\|>'
-    r'|<\|pad\|>'
-    r'|</s>'
-    r'|<s>'
-    r'|\[INST\]'
-    r'|\[/INST\]'
-    r'|\[end\]',
+    r'<\|end\|>|<\|eot_id\|>|<\|endoftext\|>|<\|im_end\|>|<\|im_start\|>'
+    r'|<end_of_turn>|<start_of_turn>|<\|assistant\|>|<\|user\|>|<\|system\|>|<\|pad\|>'
+    r'|</s>|<s>|\[INST\]|\[/INST\]|\[end\]',
   );
 
-  /// Pattern that signals the model is hallucinating a new user turn — stop immediately.
   static final _userTurnPattern = RegExp(
     r'<\|user\|>|<\|im_start\|>\s*user|<start_of_turn>\s*user|\[INST\]',
   );
 
-  /// Generate a streaming response.
-  /// [messages] is a list of {role, content} maps.
-  /// [systemPrompt] is prepended as a system message.
-  /// Returns a Stream of String tokens.
   Stream<String> generate({
     required List<Map<String, String>> messages,
     String? systemPrompt,
     double temperature = 0.7,
   }) async* {
-    if (_engine == null || !isLoaded.value) {
-      throw StateError('No model loaded. Call loadModel() first.');
-    }
-    if (isGenerating.value) {
-      throw StateError('Another generation is already in progress.');
-    }
+    if (_engine == null || !isLoaded.value) throw StateError('No model loaded. Call loadModel() first.');
+    if (isGenerating.value) throw StateError('Another generation is already in progress.');
 
     isGenerating.value = true;
     tokensPerSecond.value = 0.0;
     final stopwatch = Stopwatch()..start();
     int tokenCount = 0;
-
-    // Buffer to detect multi-token stop sequences
     String buffer = '';
 
     try {
-      // Build the full prompt from messages
       final prompt = _buildPrompt(messages, systemPrompt);
-
       await for (final token in _engine!.generate(prompt)) {
         tokenCount++;
         if (stopwatch.elapsedMilliseconds > 0) {
-          tokensPerSecond.value =
-              tokenCount / (stopwatch.elapsedMilliseconds / 1000);
+          tokensPerSecond.value = tokenCount / (stopwatch.elapsedMilliseconds / 1000);
         }
-
-        // Accumulate into buffer for stop-pattern detection
         buffer += token;
-
-        // Check if model is hallucinating a user turn — stop immediately
         if (_userTurnPattern.hasMatch(buffer)) {
-          final cleaned = buffer
-              .replaceAll(_stopPatterns, '')
-              .replaceAll(_userTurnPattern, '')
-              .trim();
-          if (cleaned.isNotEmpty) {
-            yield cleaned;
-          }
+          final cleaned = buffer.replaceAll(_stopPatterns, '').replaceAll(_userTurnPattern, '').trim();
+          if (cleaned.isNotEmpty) yield cleaned;
           break;
         }
-
-        // Check if buffer contains any stop pattern
         if (_stopPatterns.hasMatch(buffer)) {
-          // Yield everything before the stop pattern, then stop
           final cleaned = buffer.replaceAll(_stopPatterns, '').trim();
-          if (cleaned.isNotEmpty) {
-            yield cleaned;
-          }
+          if (cleaned.isNotEmpty) yield cleaned;
           break;
         }
-
-        // If buffer is getting long enough that we know it's safe, flush it
-        // Keep last 30 chars to detect split stop sequences
         if (buffer.length > 40) {
           final safe = buffer.substring(0, buffer.length - 30);
           buffer = buffer.substring(buffer.length - 30);
           yield safe;
         }
       }
-
-      // Flush any remaining buffer (cleaning all control patterns)
       if (buffer.isNotEmpty) {
-        final cleaned = buffer
-            .replaceAll(_stopPatterns, '')
-            .replaceAll(_userTurnPattern, '')
-            .trim();
-        if (cleaned.isNotEmpty) {
-          yield cleaned;
-        }
+        final cleaned = buffer.replaceAll(_stopPatterns, '').replaceAll(_userTurnPattern, '').trim();
+        if (cleaned.isNotEmpty) yield cleaned;
       }
     } finally {
       stopwatch.stop();
@@ -419,17 +329,12 @@ class LlmService extends GetxService {
     }
   }
 
-  /// Generate a chat completion using llamadart's chat-template API.
   Stream<String> generateChatCompletion({
     required List<LlamaChatMessage> messages,
     GenerationParams params = const GenerationParams(),
   }) async* {
-    if (_engine == null || !isLoaded.value) {
-      throw StateError('No model loaded. Call loadModel() first.');
-    }
-    if (isGenerating.value) {
-      throw StateError('Another generation is already in progress.');
-    }
+    if (_engine == null || !isLoaded.value) throw StateError('No model loaded. Call loadModel() first.');
+    if (isGenerating.value) throw StateError('Another generation is already in progress.');
 
     isGenerating.value = true;
     tokensPerSecond.value = 0.0;
@@ -437,19 +342,13 @@ class LlmService extends GetxService {
     int tokenCount = 0;
 
     try {
-      await for (final chunk in _engine!.create(
-        messages,
-        params: params,
-        toolChoice: ToolChoice.none,
-      )) {
+      await for (final chunk in _engine!.create(messages, params: params, toolChoice: ToolChoice.none)) {
         final choice = chunk.choices.isNotEmpty ? chunk.choices.first : null;
         final content = choice?.delta.content;
         if (content == null || content.isEmpty) continue;
-
         tokenCount++;
         if (stopwatch.elapsedMilliseconds > 0) {
-          tokensPerSecond.value =
-              tokenCount / (stopwatch.elapsedMilliseconds / 1000);
+          tokensPerSecond.value = tokenCount / (stopwatch.elapsedMilliseconds / 1000);
         }
         yield content;
       }
@@ -461,16 +360,39 @@ class LlmService extends GetxService {
     }
   }
 
-  Future<int> countTokens(String text) async {
-    if (_engine == null || !isLoaded.value) return 0;
-    try {
-      return await _engine!.getTokenCount(text);
-    } catch (_) {
-      return 0;
+  /// Vision/media-capable chat path. The native runtime handles the image
+  /// path; this is used only after a runtime capability check succeeds.
+  Stream<String> generateMultimodalCompletion({
+    required List<LlamaChatMessage> messages,
+    required String imagePath,
+    String prompt = 'Describe this image.',
+    GenerationParams params = const GenerationParams(),
+  }) async* {
+    if (_engine == null || !isLoaded.value) throw StateError('No model loaded.');
+    if (!visionSupported.value) {
+      throw StateError('Vision is not available for the loaded model. Add a matching mmproj file for GGUF vision models.');
     }
+    if (isGenerating.value) throw StateError('Another generation is already in progress.');
+
+    final multimodalMessages = <LlamaChatMessage>[...messages];
+    multimodalMessages.add(
+      LlamaChatMessage.withContent(
+        role: LlamaChatRole.user,
+        content: [
+          LlamaImageContent(path: imagePath),
+          LlamaTextContent(prompt),
+        ],
+      ),
+    );
+
+    yield* generateChatCompletion(messages: multimodalMessages, params: params);
   }
 
-  /// Stop ongoing generation.
+  Future<int> countTokens(String text) async {
+    if (_engine == null || !isLoaded.value) return 0;
+    try { return await _engine!.getTokenCount(text); } catch (_) { return 0; }
+  }
+
   Future<void> stopGeneration() async {
     _generateSub?.cancel();
     _generateSub = null;
@@ -478,47 +400,33 @@ class LlmService extends GetxService {
     isGenerating.value = false;
   }
 
-  /// Full native teardown — dispose engine AND backend to prevent stale state.
   Future<void> _fullTeardown() async {
     if (_engine != null) {
-      try {
-        await _engine!.dispose();
-      } catch (_) {
-        // Engine may already be in broken state — ignore
-      }
+      try { await _engine!.dispose(); } catch (_) {}
       _engine = null;
     }
-    // Also destroy the backend — it can't be reused after engine disposal
     _backend = null;
     isLoaded.value = false;
     loadedModelPath.value = '';
+    visionSupported.value = false;
     tokensPerSecond.value = 0.0;
   }
 
-  /// Unload the current model and free memory.
   Future<void> unloadModel() async {
     await _fullTeardown();
-
-    // Disable wake lock when model is unloaded
     try {
       final wakelockService = Get.find<WakelockService>();
       await wakelockService.disable();
     } catch (_) {}
   }
 
-  /// Build a single prompt string from chat messages.
-  String _buildPrompt(
-    List<Map<String, String>> messages,
-    String? systemPrompt,
-  ) {
+  String _buildPrompt(List<Map<String, String>> messages, String? systemPrompt) {
     final buffer = StringBuffer();
-
     if (systemPrompt != null && systemPrompt.isNotEmpty) {
       buffer.writeln('<|system|>');
       buffer.writeln(systemPrompt);
       buffer.writeln('<|end|>');
     }
-
     for (final msg in messages) {
       final role = msg['role'] ?? 'user';
       final content = msg['content'] ?? '';
@@ -526,7 +434,6 @@ class LlmService extends GetxService {
       buffer.writeln(content);
       buffer.writeln('<|end|>');
     }
-
     buffer.writeln('<|assistant|>');
     return buffer.toString();
   }
