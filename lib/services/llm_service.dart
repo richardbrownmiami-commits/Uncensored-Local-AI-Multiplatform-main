@@ -44,8 +44,6 @@ class LlmService extends GetxService {
     final filename = p.basename(path);
     final isLiteRt = filename.toLowerCase().endsWith('.litertlm');
 
-    // llamadart 0.6.13 in this APK is GGUF/llama.cpp based. Do not pretend
-    // that a .litertlm file is loadable until a LiteRT-LM runtime is bundled.
     if (isLiteRt) {
       throw UnsupportedError('LiteRT-LM (.litertlm) is not supported by this Android build. Use a .gguf model.');
     }
@@ -95,8 +93,6 @@ class LlmService extends GetxService {
       final contextSize = androidSafeMode ? 512 : 2048;
       final threads = androidSafeMode ? 2 : (Platform.numberOfProcessors > 4 ? 4 : 0);
 
-      // The published APK is CPU-only for Android armeabi-v7a. Never reuse
-      // persisted Vulkan/OpenCL settings or GPU layers on that target.
       final storage = Get.find<ChatStorageService>();
       GpuBackend parsedBackend;
       switch (storage.backendType) {
@@ -133,7 +129,8 @@ class LlmService extends GetxService {
       if (_loadingCancelled) { await _fullTeardown(); _resetLoadingState(); return; }
 
       visionSupported.value = false;
-      final files = await file.parent.list().whereType<File>().toList();
+      final entities = await file.parent.list().toList();
+      final files = entities.whereType<File>().toList();
       final stem = p.basenameWithoutExtension(filename).toLowerCase();
       final named = files.where((f) {
         final n = p.basename(f.path).toLowerCase();
