@@ -6,11 +6,11 @@ class AiModelInfo {
   final String url;
   final double sizeGb;
   final int minRamGb;
-  final String label;        // UNCENSORED / STANDARD / CUSTOM
-  final String badge;        // RECOMMENDED, HERETIC, etc.
+  final String label;
+  final String badge;
   final String systemPrompt;
   final bool recommended;
-  final List<String> capabilities; // chat, tools, vision, image-input, etc.
+  final List<String> capabilities;
 
   const AiModelInfo({
     required this.id,
@@ -26,17 +26,13 @@ class AiModelInfo {
     this.capabilities = const <String>[],
   });
 
-  /// Builds accurate local metadata for the GGUF/LiteRT files the user
-  /// already has on disk. This keeps imported/shared models useful even when
-  /// they are not present in the remote download catalog.
+  /// Metadata for the model files already present on the user's device.
   factory AiModelInfo.fromLocalFilename(String filename, {double sizeGb = 0}) {
     final lower = filename.toLowerCase();
-
     String name = filename;
     List<String> capabilities = const <String>['chat'];
     int minRamGb = 1;
     String badge = 'LOCAL';
-    String systemPrompt = 'You are a helpful AI assistant.';
 
     if (lower == 'llama-3.2-1b-instruct-q5_k_m.gguf') {
       name = 'Llama 3.2 1B Instruct Q5_K_M';
@@ -55,13 +51,7 @@ class AiModelInfo {
     } else if (lower == 'qwen3.5-0.8b-abliterated-huihui.gguf') {
       name = 'Qwen3.5 0.8B Abliterated';
       minRamGb = 2;
-      capabilities = const <String>[
-        'chat',
-        'tools',
-        'vision',
-        'image-input',
-        'video-input',
-      ];
+      capabilities = const <String>['chat', 'tools', 'vision', 'image-input'];
       badge = 'LOCAL · VISION · TOOLS';
     } else if (lower == 'osmosis-structure-0.6b-q4_k_m.gguf') {
       name = 'Osmosis-Structure 0.6B Q4_K_M';
@@ -74,8 +64,8 @@ class AiModelInfo {
     } else if (lower == 'qwen3_0_6b_mixed_int4.litertlm') {
       name = 'Qwen3 0.6B Mixed INT4 (LiteRT-LM)';
       minRamGb = 1;
-      capabilities = const <String>['chat', 'litert-lm'];
-      badge = 'LOCAL · LITERT-LM';
+      capabilities = const <String>['chat', 'tools', 'structured-json', 'litert-lm'];
+      badge = 'LOCAL · LITERT-LM · TOOLS';
     } else if (lower == 'smollm2-135m-instruct.q8_0.gguf') {
       name = 'SmolLM2 135M Instruct Q8_0';
       minRamGb = 1;
@@ -90,7 +80,7 @@ class AiModelInfo {
       minRamGb: minRamGb,
       label: 'CUSTOM',
       badge: badge,
-      systemPrompt: systemPrompt,
+      systemPrompt: 'You are a helpful AI assistant.',
       capabilities: capabilities,
     );
   }
@@ -107,10 +97,7 @@ class AiModelInfo {
       badge: json['badge'] as String? ?? '',
       systemPrompt: json['systemPrompt'] as String? ?? '',
       recommended: json['recommended'] as bool? ?? false,
-      capabilities: (json['capabilities'] as List<dynamic>?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          const <String>[],
+      capabilities: (json['capabilities'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const <String>[],
     );
   }
 
