@@ -27,15 +27,19 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // This APK is specifically the 32-bit ARMv7 build. Prevent native
+        // plugins such as FCLlama from being configured/packaged for arm64.
+        ndk {
+            abiFilters += setOf("armeabi-v7a")
+        }
     }
 
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
-            // Keep the release build unminified while the native ARMv7/FCLlama
-            // integration is being validated. R8 currently fails on Flutter's
-            // optional Play Store deferred-component classes, which this APK
-            // does not use. This is not a model-size or RAM restriction.
+            // Keep release unminified. The app does not use deferred Play
+            // components, and R8 was failing on those optional classes.
             isMinifyEnabled = false
             isShrinkResources = false
         }
