@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,10 +25,10 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          android-version: 34
-          build-tools-version: 34.0.0
-          ndk-version: 26.2.11394342
-          cmake-version: 3.22.1
+          android-version: 35
+          build-tools-version: 35.0.0
+          ndk-version: 28.0.12674087
+          cmake-version: 3.31.0
           accept-licenses: yes
 
       - name: Setup Flutter
@@ -44,8 +44,11 @@ jobs:
       - name: Get Dependencies
         run: flutter pub get
 
+      - name: Verify ARMv7 Android target
+        run: flutter build apk --target-platform android-arm --debug --no-shrink
+
       - name: Build APK for armeabi-v7a (32-bit)
-        run: flutter build apk --target-platform android-arm
+        run: flutter build apk --target-platform android-arm --release
 
       - name: Rename APK
         run: |
@@ -67,15 +70,21 @@ jobs:
           files: build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
           body: |
             Android 32-bit (armeabi-v7a) build of Uncensored Local AI.
-            
+
+            ARMv7 uses the fcllama/llama.cpp native backend with CPU-only
+            inference, small context defaults, and app-private GGUF storage.
+
             **Features:**
             - Zero Censorship AI
             - Fully Offline
             - Local OpenAI API Server
             - Model Library
             - Chat History
-            
+
             **Architecture:** armeabi-v7a (32-bit ARM)
+            **Minimum Android:** API 23 (Android 6), Android 10+ recommended
             **Target:** Older/budget Android phones
-            
-            **Note:** This build only supports 32-bit ARM devices.
+
+            **Note:** 32-bit ARM devices have limited address space. Small
+            GGUF models (including ~200 MB models) are the intended baseline;
+            model size is not a guarantee of successful loading on a 1 GB device.
