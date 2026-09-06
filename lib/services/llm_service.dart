@@ -106,9 +106,15 @@ class LlmService extends GetxService {
         preferredBackend: androidSafeMode ? GpuBackend.cpu : parsedBackend,
         numberOfThreads: threads,
         numberOfThreadsBatch: threads,
+        // Android model files are already copied into app-private storage by
+        // ModelManager. Disable mmap here because mmap-backed GGUF loading can
+        // stall on some 32-bit Android filesystems even when normal file I/O
+        // and standalone llama.cpp work correctly.
+        useMmap: !androidSafeMode,
+        useMlock: false,
       );
 
-      log?.info('Runtime config: android=$androidSafeMode cpu=${androidSafeMode ? 'forced' : 'auto'} context=$contextSize threads=$threads gpuLayers=${params.gpuLayers}', source: 'LLM');
+      log?.info('Runtime config: android=$androidSafeMode cpu=${androidSafeMode ? 'forced' : 'auto'} context=$contextSize threads=$threads gpuLayers=${params.gpuLayers} mmap=${params.useMmap}', source: 'LLM');
       final loadStopwatch = Stopwatch()..start();
       late final Timer loadHeartbeat;
       loadHeartbeat = Timer.periodic(const Duration(seconds: 2), (_) {
