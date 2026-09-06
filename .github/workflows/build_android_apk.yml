@@ -75,6 +75,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      # Release is intentionally unminified in android/app/build.gradle.kts.
+      # This avoids R8 trying to resolve optional Google Play deferred-component
+      # classes that are not part of this APK.
       - name: Build ARMv7 release APK
         run: flutter build apk --target-platform android-arm --release --no-shrink --android-skip-build-dependency-validation
 
