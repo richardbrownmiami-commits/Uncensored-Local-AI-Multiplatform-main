@@ -12,60 +12,43 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Java JDK
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
           accept-android-sdk-licenses: true
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0 cmake;3.31.0 ndk;28.2.13676358'
-
       - name: Verify Android native toolchain
         run: |
           set -euxo pipefail
           sdkmanager --list_installed | grep -E 'platforms;android-35|build-tools;35.0.0|cmake;3.31.0|ndk;28.2.13676358'
           test -x "$ANDROID_SDK_ROOT/cmake/3.31.0/bin/cmake"
           test -x "$ANDROID_SDK_ROOT/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
-          "$ANDROID_SDK_ROOT/cmake/3.31.0/bin/cmake" --version
-          "$ANDROID_SDK_ROOT/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version
-
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.47.2'
           channel: 'stable'
           cache: true
-
       - name: Flutter Doctor
         run: flutter doctor
-
       - name: Get Dependencies
         run: flutter pub get
-
-      # Build debug separately so a later release failure can never prevent the
-      # working ARMv7 APK from being uploaded as a GitHub Actions artifact.
       - name: Build ARMv7 debug APK
         run: flutter build apk --target-platform android-arm --debug --no-shrink --android-skip-build-dependency-validation
-
       - name: Verify debug APK ABI
         run: |
           set -euxo pipefail
           APK=build/app/outputs/flutter-apk/app-debug.apk
           test -f "$APK"
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
-          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then
-            echo 'Unexpected non-ARMv7 native libraries found in the debug APK'
-            exit 1
-          fi
-
+          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then exit 1; fi
       - name: Upload ARMv7 debug APK
         if: always()
         uses: actions/upload-artifact@v4
@@ -74,28 +57,17 @@ jobs:
           path: build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: warn
           retention-days: 30
-
-      # Release is intentionally unminified in android/app/build.gradle.kts.
-      # This avoids R8 trying to resolve optional Google Play deferred-component
-      # classes that are not part of this APK.
       - name: Build ARMv7 release APK
         run: flutter build apk --target-platform android-arm --release --no-shrink --android-skip-build-dependency-validation
-
       - name: Verify release APK ABI
         run: |
           set -euxo pipefail
           APK=build/app/outputs/flutter-apk/app-release.apk
           test -f "$APK"
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
-          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then
-            echo 'Unexpected non-ARMv7 native libraries found in the release APK'
-            exit 1
-          fi
-
+          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then exit 1; fi
       - name: Rename release APK
-        run: |
-          mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
-
+        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
       - name: Upload release APK Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -103,7 +75,6 @@ jobs:
           path: build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
           if-no-files-found: error
           retention-days: 30
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main'
@@ -112,15 +83,7 @@ jobs:
           tag_name: v2.0.0-armeabi-v7a
           files: build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
           body: |
-            Android 32-bit (armeabi-v7a) build of Uncensored Local AI.
-
-            ARMv7 uses the fcllama/llama.cpp native backend with CPU-only
-            inference and app-private GGUF storage.
-
-            **Architecture:** armeabi-v7a (32-bit)
-            **Minimum Android:** API 29 (Android 10)
-
-            Valid GGUF files are allowed to attempt loading. The application
-            does not impose an artificial model-size or RAM cutoff; actual
-            native memory availability determines whether a particular model
-            can load successfully on a device.
+            Android 32-bit ARMv7 build using a native SmolChat-style llama.cpp engine.
+            Architecture: armeabi-v7a (32-bit)
+            Minimum Android: API 29 (Android 10)
+            GGUF loading has no artificial model-size or RAM cutoff.
