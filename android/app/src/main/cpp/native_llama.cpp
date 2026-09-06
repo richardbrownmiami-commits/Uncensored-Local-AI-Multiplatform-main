@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
-#include <cmath>
+#include <algorithm>
 #include "llama.h"
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "PortableLLM", __VA_ARGS__)
@@ -15,10 +15,21 @@ llama_model * g_model = nullptr;
 llama_context * g_ctx = nullptr;
 llama_sampler * g_sampler = nullptr;
 int g_ctx_size = 512;
-int g_threads = 2;
+
+void free_sampler_locked() {
+    if (g_sampler) { llama_sampler_free(g_sampler); g_sampler = nullptr; }
+}
+
+void make_sampler_locked(float temperature) {
+    free_sampler_locked();
+    g_sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    llama_sampler_chain_add(g_sampler, llama_sampler_init_min_p(0.05f, 1));
+    llama_sampler_chain_add(g_sampler, llama_sampler_init_temp(std::max(0.0f, temperature)));
+    llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+}
 
 void free_engine_locked() {
-    if (g_sampler) { llama_sampler_free(g_sampler); g_sampler = nullptr; }
+    free_sampler_locked();
     if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
 }
@@ -65,53 +76,40 @@ Java_com_portableai_portable_1ai_1flutter_NativeLlama_nativeLoad(JNIEnv * env, j
 
     LOGI("Loading GGUF with native llama.cpp: %s", path.c_str());
     g_model = llama_model_load_from_file(path.c_str(), mp);
-    if (!g_model) {
-        return result(env, false, "llama.cpp could not load the GGUF model");
-    }
+    if (!g_model) return result(env, false, "llama.cpp could not load the GGUF model");
 
     llama_context_params cp = llama_context_default_params();
     g_ctx_size = nCtx > 0 ? nCtx : 512;
-    g_threads = nThreads > 0 ? nThreads : 2;
+    const int batch = std::max(32, std::min(nBatch > 0 ? nBatch : 128, g_ctx_size));
+    const int threads = std::max(1, std::min(nThreads > 0 ? nThreads : 2, 16));
     cp.n_ctx = g_ctx_size;
-    cp.n_batch = nBatch > 0 ? nBatch : g_ctx_size;
-    cp.n_ubatch = cp.n_batch;
-    cp.n_threads = g_threads;
-    cp.n_threads_batch = g_threads;
+    cp.n_batch = batch;
+    cp.n_ubatch = batch;
+    cp.n_threads = threads;
+    cp.n_threads_batch = threads;
 
     g_ctx = llama_init_from_model(g_model, cp);
     if (!g_ctx) {
         free_engine_locked();
         return result(env, false, "llama.cpp loaded the model but could not create its context");
     }
-
-    g_sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(g_sampler, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(g_sampler, llama_sampler_init_temp(0.7f));
-    llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-
+    make_sampler_locked(0.7f);
     return result(env, true, "Native SmolChat-style llama.cpp engine ready");
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_portableai_portable_1ai_1flutter_NativeLlama_nativeGenerate(JNIEnv * env, jobject, jstring prompt, jint maxTokens, jfloat temperature) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_model || !g_ctx || !g_sampler) return env->NewStringUTF("ERROR: native llama.cpp model is not loaded");
+    if (!g_model || !g_ctx) return env->NewStringUTF("ERROR: native llama.cpp model is not loaded");
     const std::string input = jstr(env, prompt);
     if (input.empty()) return env->NewStringUTF("");
-
-    llama_sampler_reset(g_sampler);
-    llama_sampler_chain_add(g_sampler, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(g_sampler, llama_sampler_init_temp(std::max(0.0f, (float)temperature)));
-    llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+    make_sampler_locked(temperature);
 
     const llama_vocab * vocab = llama_model_get_vocab(g_model);
-    const bool addSpecial = true;
-    const int needed = -llama_tokenize(vocab, input.c_str(), (int)input.size(), nullptr, 0, true, addSpecial);
+    const int needed = -llama_tokenize(vocab, input.c_str(), (int)input.size(), nullptr, 0, true, true);
     if (needed <= 0) return env->NewStringUTF("ERROR: tokenization failed");
     std::vector<llama_token> tokens((size_t)needed);
-    if (llama_tokenize(vocab, input.c_str(), (int)input.size(), tokens.data(), (int)tokens.size(), true, addSpecial) < 0) {
-        return env->NewStringUTF("ERROR: tokenization failed");
-    }
+    if (llama_tokenize(vocab, input.c_str(), (int)input.size(), tokens.data(), (int)tokens.size(), true, true) < 0) return env->NewStringUTF("ERROR: tokenization failed");
 
     llama_memory_clear(llama_get_memory(g_ctx), true);
     llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
@@ -121,13 +119,9 @@ Java_com_portableai_portable_1ai_1flutter_NativeLlama_nativeGenerate(JNIEnv * en
     for (int generated = 0; generated < limit; ++generated) {
         const int used = (int)llama_memory_seq_pos_max(llama_get_memory(g_ctx), 0) + 1;
         if (used + batch.n_tokens > g_ctx_size) break;
-        const int rc = llama_decode(g_ctx, batch);
-        if (rc != 0) {
-            return env->NewStringUTF("ERROR: llama.cpp decode failed");
-        }
+        if (llama_decode(g_ctx, batch) != 0) return env->NewStringUTF("ERROR: llama.cpp decode failed");
         const llama_token token = llama_sampler_sample(g_sampler, g_ctx, -1);
         if (llama_vocab_is_eog(vocab, token)) break;
-
         char buf[512];
         const int n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, true);
         if (n > 0) output.append(buf, n);
