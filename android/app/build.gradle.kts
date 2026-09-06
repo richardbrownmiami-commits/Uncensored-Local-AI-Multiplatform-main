@@ -32,6 +32,12 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
+            // Keep the release build unminified while the native ARMv7/FCLlama
+            // integration is being validated. R8 currently fails on Flutter's
+            // optional Play Store deferred-component classes, which this APK
+            // does not use. This is not a model-size or RAM restriction.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
