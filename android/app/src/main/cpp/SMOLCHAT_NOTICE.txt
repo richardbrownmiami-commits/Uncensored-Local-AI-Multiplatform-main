@@ -1,0 +1,7 @@
+Native inference architecture and portions of the JNI/C++ implementation are adapted from SmolChat-Android by Shubham Panchal, licensed under the Apache License 2.0.
+
+Source project: https://github.com/shubham0204/SmolChat-Android
+
+This project retains its own Flutter application code. The native layer follows the SmolChat design of C++ LLMInference + JNI + llama.cpp for on-device GGUF inference.
+
+llama.cpp is a separate project by ggml-org and is fetched at a pinned source revision during the Android native build. See its repository and license for the applicable terms.
