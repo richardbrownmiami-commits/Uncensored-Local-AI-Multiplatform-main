@@ -12,9 +12,7 @@ void LLMInference::loadModel(const char* modelPath, float minP, float temperatur
                              bool useMmap, bool useMlock) {
     LOGI("loadModel path=%s ctx=%ld batch=%d threads=%d mmap=%d mlock=%d",
          modelPath, contextSize, nBatch, nThreads, useMmap, useMlock);
-
     llama_backend_init();
-
     llama_model_params modelParams = llama_model_default_params();
     modelParams.use_mmap = useMmap;
     modelParams.use_mlock = useMlock;
@@ -40,9 +38,11 @@ void LLMInference::loadModel(const char* modelPath, float minP, float temperatur
     llama_sampler_chain_add(_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     _formattedMessages = std::vector<char>(llama_n_ctx(_ctx));
-    _messages.clear();
+    clearMessagesInternal();
     _response.clear();
     _cacheResponseTokens.clear();
+    _ownedChatTemplate.clear();
+    _chatTemplate = nullptr;
 
     if (chatTemplate && *chatTemplate) {
         _ownedChatTemplate = chatTemplate;
@@ -57,19 +57,33 @@ void LLMInference::loadModel(const char* modelPath, float minP, float temperatur
     _storeChats = storeChats;
 }
 
+void LLMInference::clearMessagesInternal() {
+    for (llama_chat_message& message : _messages) {
+        free(const_cast<char*>(message.role));
+        free(const_cast<char*>(message.content));
+    }
+    _messages.clear();
+}
+
+void LLMInference::clearMessages() {
+    clearMessagesInternal();
+    _response.clear();
+    _cacheResponseTokens.clear();
+    if (_ctx) llama_memory_clear(llama_get_memory(_ctx), true);
+}
+
 void LLMInference::addChatMessage(const char* message, const char* role) {
     _messages.push_back({strdup(role), strdup(message)});
 }
 
 float LLMInference::getResponseGenerationSpeed() const {
     if (_responseGenerationTime <= 0) return 0.0f;
-    return (float) _responseNumTokens / ((float) _responseGenerationTime / 1000000.0f);
+    return (float)_responseNumTokens / ((float)_responseGenerationTime / 1000000.0f);
 }
 
 int LLMInference::getContextSizeUsed() const { return _nCtxUsed; }
 
 bool LLMInference::startCompletion(const char* query) {
-    if (!_storeChats) _messages.clear();
     _response.clear();
     _cacheResponseTokens.clear();
     _responseGenerationTime = 0;
@@ -139,12 +153,10 @@ bool LLMInference::_isValidUtf8(const char* response) {
 std::string LLMInference::completionLoop() {
     const uint32_t contextSize = llama_n_ctx(_ctx);
     _nCtxUsed = (int)llama_memory_seq_pos_max(llama_get_memory(_ctx), 0) + 1;
-    if (_nCtxUsed + (int)_batch->n_tokens > (int)contextSize)
-        throw std::runtime_error("context size reached");
+    if (_nCtxUsed + (int)_batch->n_tokens > (int)contextSize) throw std::runtime_error("context size reached");
 
     const auto start = ggml_time_us();
     if (llama_decode(_ctx, *_batch) < 0) throw std::runtime_error("llama_decode failed");
-
     _currToken = llama_sampler_sample(_sampler, _ctx, -1);
     if (llama_vocab_is_eog(llama_model_get_vocab(_model), _currToken)) {
         if (_storeChats) addChatMessage(_response.c_str(), "assistant");
@@ -154,14 +166,10 @@ std::string LLMInference::completionLoop() {
     char pieceBuffer[4096];
     const int pieceLength = llama_token_to_piece(llama_model_get_vocab(_model), _currToken,
                                                   pieceBuffer, sizeof(pieceBuffer), 0, true);
-    if (pieceLength > 0) {
-        _cacheResponseTokens.append(pieceBuffer, pieceLength);
-    }
-
+    if (pieceLength > 0) _cacheResponseTokens.append(pieceBuffer, pieceLength);
     const auto end = ggml_time_us();
     _responseGenerationTime += end - start;
     _responseNumTokens++;
-
     _batch->token = &_currToken;
     _batch->n_tokens = 1;
 
@@ -182,7 +190,6 @@ void LLMInference::stopCompletion() {
 
 void LLMInference::setTemperature(float temperature) {
     if (!_sampler) return;
-    // Sampler chains are immutable in practice, so rebuild the small sampling chain.
     llama_sampler_free(_sampler);
     auto params = llama_sampler_chain_default_params();
     params.no_perf = true;
@@ -193,10 +200,7 @@ void LLMInference::setTemperature(float temperature) {
 }
 
 LLMInference::~LLMInference() {
-    for (llama_chat_message& message : _messages) {
-        free(const_cast<char*>(message.role));
-        free(const_cast<char*>(message.content));
-    }
+    clearMessagesInternal();
     delete _batch;
     if (_sampler) llama_sampler_free(_sampler);
     if (_ctx) llama_free(_ctx);
