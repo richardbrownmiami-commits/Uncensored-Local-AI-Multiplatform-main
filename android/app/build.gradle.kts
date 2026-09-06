@@ -21,9 +21,8 @@ android {
 
     defaultConfig {
         applicationId = "com.portableai.portable_ai_flutter"
-        // Android 10 is API 29. Keep the engine compatible with older Android
-        // versions too; the 32-bit llama.cpp backend itself supports API 23+.
-        minSdk = 23
+        // Product requirement: Android 10 (API 29) minimum.
+        minSdk = 29
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
