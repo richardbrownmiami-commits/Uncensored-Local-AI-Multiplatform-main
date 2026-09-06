@@ -35,6 +35,7 @@ class MainActivity : FlutterActivity() {
                             NativeSmolChat.addMessage(call.argument<String>("role") ?: "user", call.argument<String>("text") ?: "")
                             result.success(true)
                         }
+                        "closeConversation" -> { NativeSmolChat.clearMessages(); result.success(true) }
                         "start" -> result.success(NativeSmolChat.start(call.argument<String>("query") ?: ""))
                         "step" -> result.success(NativeSmolChat.step())
                         "stop" -> { NativeSmolChat.stop(); result.success(true) }
