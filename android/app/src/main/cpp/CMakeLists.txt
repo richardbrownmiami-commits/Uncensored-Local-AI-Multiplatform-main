@@ -26,9 +26,7 @@ set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
 include(FetchContent)
 FetchContent_Declare(
   llama_cpp
-  GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-  GIT_TAG 465e49b9cea78a68b9c244ffb48d0ee24a82873d
-  GIT_SHALLOW TRUE
+  URL https://github.com/ggml-org/llama.cpp/archive/465e49b9cea78a68b9c244ffb48d0ee24a82873d.tar.gz
 )
 FetchContent_MakeAvailable(llama_cpp)
 
@@ -61,7 +59,6 @@ endif()
 target_compile_definitions(smolchat_native PRIVATE GGML_USE_CPU=1)
 
 target_link_libraries(smolchat_native PRIVATE android log llama common)
-
 target_link_options(smolchat_native PRIVATE
   -Wl,--gc-sections
   -Wl,--exclude-libs,ALL
