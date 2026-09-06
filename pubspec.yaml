@@ -10,11 +10,9 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Primary cross-platform LLM engine. Android 32-bit uses the dedicated
-  # fcllama/llama.cpp path below because llamadart's tested Android matrix
-  # does not include armeabi-v7a.
+  # Cross-platform desktop/iOS engine. Android uses the native SmolChat-style
+  # llama.cpp/JNI engine in android/app/src/main/cpp.
   llamadart: ^0.6.13
-  fcllama: ^0.0.3
 
   # ── State Management ────────────────────────────────────────────
   get: ^4.7.2
@@ -37,7 +35,7 @@ dependencies:
   # ── Tools & Utilities ────────────────────────────────────────────
   device_info_plus: ^10.1.0
 
-  # ── UI Helpers ───────────────────────────────────────────────────
+  # ── UI Helpers ────────────────────────────────────────────────────
   flutter_markdown: ^0.7.6
   google_fonts: ^6.2.1
   percent_indicator: ^4.2.4
@@ -55,13 +53,6 @@ dev_dependencies:
   hive_generator: ^2.0.1
   build_runner: ^2.4.13
   flutter_lints: ^6.0.0
-
-hooks:
-  user_defines:
-    llamadart:
-      llamadart_native_backends:
-        platforms:
-          android-armeabi-v7a: [cpu]
 
 flutter:
   uses-material-design: true
