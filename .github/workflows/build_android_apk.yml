@@ -25,11 +25,17 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          android-version: 35
-          build-tools-version: 35.0.0
-          ndk-version: 28.0.12674087
-          cmake-version: 3.31.0
-          accept-licenses: yes
+          accept-android-sdk-licenses: true
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 cmake;3.31.0 ndk;28.2.13676358'
+
+      - name: Verify Android native toolchain
+        run: |
+          set -euxo pipefail
+          sdkmanager --list_installed | grep -E 'platforms;android-35|build-tools;35.0.0|cmake;3.31.0|ndk;28.2.13676358'
+          test -x "$ANDROID_SDK_ROOT/cmake/3.31.0/bin/cmake"
+          test -x "$ANDROID_SDK_ROOT/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          "$ANDROID_SDK_ROOT/cmake/3.31.0/bin/cmake" --version
+          "$ANDROID_SDK_ROOT/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -45,10 +51,21 @@ jobs:
         run: flutter pub get
 
       - name: Verify ARMv7 Android target
-        run: flutter build apk --target-platform android-arm --debug --no-shrink
+        run: flutter build apk --target-platform android-arm --debug --no-shrink --android-skip-build-dependency-validation
 
       - name: Build APK for armeabi-v7a (32-bit)
-        run: flutter build apk --target-platform android-arm --release
+        run: flutter build apk --target-platform android-arm --release --no-shrink --android-skip-build-dependency-validation
+
+      - name: Verify APK ABI
+        run: |
+          set -euxo pipefail
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          test -f "$APK"
+          unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
+          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then
+            echo 'Unexpected non-ARMv7 native libraries found in the APK'
+            exit 1
+          fi
 
       - name: Rename APK
         run: |
@@ -72,19 +89,12 @@ jobs:
             Android 32-bit (armeabi-v7a) build of Uncensored Local AI.
 
             ARMv7 uses the fcllama/llama.cpp native backend with CPU-only
-            inference, small context defaults, and app-private GGUF storage.
-
-            **Features:**
-            - Zero Censorship AI
-            - Fully Offline
-            - Local OpenAI API Server
-            - Model Library
-            - Chat History
+            inference and app-private GGUF storage.
 
             **Architecture:** armeabi-v7a (32-bit ARM)
-            **Minimum Android:** API 23 (Android 6), Android 10+ recommended
-            **Target:** Older/budget Android phones
+            **Minimum Android:** API 29 (Android 10)
 
-            **Note:** 32-bit ARM devices have limited address space. Small
-            GGUF models (including ~200 MB models) are the intended baseline;
-            model size is not a guarantee of successful loading on a 1 GB device.
+            Valid GGUF files are allowed to attempt loading. The application
+            does not impose an artificial model-size or RAM cutoff; actual
+            native memory availability determines whether a particular model
+            can load successfully on a device.
