@@ -5,7 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # SmolChat architecture: native C++ LLMInference -> llama.cpp -> GGUF.
-# Keep Android CPU-only and build the same ARMv7 target used by SmolChat.
+# This Android target is intentionally 32-bit ARM only.
+if (ANDROID AND NOT ANDROID_ABI STREQUAL "armeabi-v7a")
+  message(FATAL_ERROR "Portable AI native engine must be built for armeabi-v7a; got ${ANDROID_ABI}")
+endif()
+
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -22,6 +26,14 @@ set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
+
+# ARMv7/32-bit Android settings used by SmolChat's ARMv7 build discussion.
+# Apply them before FetchContent so llama.cpp itself receives the same target flags.
+if (ANDROID_ABI STREQUAL "armeabi-v7a")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp" CACHE STRING "" FORCE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp" CACHE STRING "" FORCE)
+  set(ANDROID_ARM_NEON ON CACHE BOOL "" FORCE)
+endif()
 
 include(FetchContent)
 FetchContent_Declare(
@@ -46,7 +58,7 @@ target_include_directories(smolchat_native PRIVATE
 if (ANDROID_ABI STREQUAL "armeabi-v7a")
   target_compile_options(smolchat_native PRIVATE
     -march=armv7-a
-    -mfpu=neon-vfpv4
+    -mfpu=vfpv3-d16
     -mfloat-abi=softfp
     -O3
     -fvisibility=hidden
