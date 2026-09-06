@@ -2,8 +2,6 @@
 #include <jni.h>
 #include <stdexcept>
 
-static const char* CLASS_NAME = "com/portableai/portable_ai_flutter/NativeSmolChat";
-
 static std::string toString(JNIEnv* env, jstring value) {
     if (!value) return {};
     const char* raw = env->GetStringUTFChars(value, nullptr);
@@ -78,9 +76,12 @@ Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeStep(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeStop(
-    JNIEnv*, jobject, jlong handle) {
-    try { ptr(handle)->stopCompletion(); }
-    catch (const std::exception& error) { /* no Java env available here */ }
+    JNIEnv* env, jobject, jlong handle) {
+    try {
+        ptr(handle)->stopCompletion();
+    } catch (const std::exception& error) {
+        throwState(env, error);
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -97,7 +98,7 @@ Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeSpeed(
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_portableai_portable_ai_1flutter_NativeSmolChat_nativeContextUsed(
+Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeContextUsed(
     JNIEnv*, jobject, jlong handle) {
     return ptr(handle)->getContextSizeUsed();
 }
