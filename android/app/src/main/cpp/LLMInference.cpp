@@ -10,12 +10,13 @@
 void LLMInference::loadModel(const char* modelPath, float minP, float temperature, bool storeChats,
                              long contextSize, const char* chatTemplate, int nThreads, int nBatch,
                              bool useMmap, bool useMlock) {
+    // The pinned llama.cpp C API owns mmap/mlock policy in its default model params.
+    // Keep the public SmolChat-compatible arguments for the Flutter/JNI layer, but do
+    // not access removed fields from newer llama_model_params structs.
     LOGI("loadModel path=%s ctx=%ld batch=%d threads=%d mmap=%d mlock=%d",
          modelPath, contextSize, nBatch, nThreads, useMmap, useMlock);
     llama_backend_init();
     llama_model_params modelParams = llama_model_default_params();
-    modelParams.use_mmap = useMmap;
-    modelParams.use_mlock = useMlock;
     modelParams.n_gpu_layers = 0;
     _model = llama_model_load_from_file(modelPath, modelParams);
     if (!_model) throw std::runtime_error("llama.cpp failed to load GGUF model");
