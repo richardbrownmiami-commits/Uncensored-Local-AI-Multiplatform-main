@@ -7,8 +7,9 @@ plugins {
 android {
     namespace = "com.portableai.portable_ai_flutter"
     compileSdk = flutter.compileSdkVersion
-    // fcllama's Android llama.cpp build requires NDK 28.x.
-    ndkVersion = "28.0.12674087"
+    // fcllama/jni requires NDK 28.2; newer NDKs remain compatible with the
+    // other Android plugins used by this application.
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
