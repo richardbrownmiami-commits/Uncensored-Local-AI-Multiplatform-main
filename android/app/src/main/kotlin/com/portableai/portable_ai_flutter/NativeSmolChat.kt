@@ -27,6 +27,7 @@ object NativeSmolChat {
     }
 
     fun addMessage(role: String, text: String) { verify(); nativeAddMessage(handle, text, role) }
+    fun clearMessages() { verify(); nativeClearMessages(handle) }
     fun start(query: String): Boolean { verify(); return nativeStart(handle, query) }
     fun step(): String { verify(); return nativeStep(handle) }
     fun stop() { if (handle != 0L) nativeStop(handle) }
@@ -40,6 +41,7 @@ object NativeSmolChat {
         storeChats: Boolean, contextSize: Long, nThreads: Int, nBatch: Int,
         useMmap: Boolean, useMlock: Boolean, chatTemplate: String?): Long
     private external fun nativeAddMessage(handle: Long, message: String, role: String)
+    private external fun nativeClearMessages(handle: Long)
     private external fun nativeStart(handle: Long, query: String): Boolean
     private external fun nativeStep(handle: Long): String
     private external fun nativeStop(handle: Long)
