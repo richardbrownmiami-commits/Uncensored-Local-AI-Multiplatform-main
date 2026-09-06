@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:get/get.dart';
+import 'package:fcllama/fllama.dart';
+import 'package:fcllama/fllama_type.dart' as fcllama_types;
 import 'package:llamadart/llamadart.dart';
 import 'package:path/path.dart' as p;
 
@@ -8,9 +10,18 @@ import 'wakelock_service.dart';
 import 'chat_storage_service.dart';
 import 'log_service.dart';
 
+/// Local LLM service.
+///
+/// Android armeabi-v7a deliberately uses FCLlama's direct llama.cpp binding.
+/// The llamadart native runtime currently documents Android arm64-v8a/x86_64
+/// as its tested Android architectures, while FCLlama explicitly supports
+/// armeabi-v7a. Desktop/iOS paths keep the existing llamadart implementation.
 class LlmService extends GetxService {
   LlamaEngine? _engine;
   LlamaBackend? _backend;
+  double? _androidContextId;
+  StreamSubscription? _androidEvents;
+  bool get _useAndroidFcllama => Platform.isAndroid;
 
   final isLoaded = false.obs;
   final isGenerating = false.obs;
@@ -23,7 +34,6 @@ class LlmService extends GetxService {
   final loadingProgress = 0.0.obs;
   final loadingStatusMsg = ''.obs;
   bool _loadingCancelled = false;
-  StreamSubscription? _generateSub;
 
   String get loadedModelFilename => loadedModelPath.value.isEmpty ? '' : p.basename(loadedModelPath.value);
   String get publicModelId {
@@ -34,7 +44,13 @@ class LlmService extends GetxService {
   }
   bool get isLiteRtLm => loadedModelFilename.toLowerCase().endsWith('.litertlm');
   Future<LlmService> init() async => this;
-  void cancelLoading() => _loadingCancelled = true;
+
+  void cancelLoading() {
+    _loadingCancelled = true;
+    try {
+      if (_androidContextId != null) FCllama.instance()?.releaseContext(_androidContextId!);
+    } catch (_) {}
+  }
 
   Future<void> loadModel(String path) async {
     LogService? log;
@@ -42,186 +58,191 @@ class LlmService extends GetxService {
     final file = File(path);
     if (!await file.exists()) throw Exception('Model file not found: $path');
     final filename = p.basename(path);
-    final isLiteRt = filename.toLowerCase().endsWith('.litertlm');
-
-    if (isLiteRt) {
+    if (filename.toLowerCase().endsWith('.litertlm')) {
       throw UnsupportedError('LiteRT-LM (.litertlm) is not supported by this Android build. Use a .gguf model.');
     }
 
-    log?.info('Loading model: $filename', source: 'LLM');
     loadingStatusMsg.value = 'Validating GGUF file...';
     loadingProgress.value = 0.0;
-    try {
-      final handle = await file.open(mode: FileMode.read);
-      final magic = await handle.read(8);
-      await handle.close();
-      if (magic.length < 4 || String.fromCharCodes(magic.sublist(0, 4)) != 'GGUF') {
-        throw Exception('File does not have valid GGUF format signature.');
-      }
-    } catch (e) {
-      throw Exception('Invalid or corrupted GGUF file: "$filename". Error: $e');
+    final handle = await file.open(mode: FileMode.read);
+    final magic = await handle.read(8);
+    await handle.close();
+    if (magic.length < 4 || String.fromCharCodes(magic.sublist(0, 4)) != 'GGUF') {
+      throw Exception('Invalid or corrupted GGUF file: "$filename".');
     }
 
     _loadingCancelled = false;
     isLoadingModel.value = true;
+    isLoaded.value = false;
     loadingProgress.value = 0.05;
-    loadingStatusMsg.value = 'Preparing...';
+    loadingStatusMsg.value = 'Preparing $filename...';
 
-    WakelockService? wakelockService;
-    try { wakelockService = Get.find<WakelockService>(); } catch (_) {}
-    if (_engine != null || isLoaded.value) {
-      loadingStatusMsg.value = 'Unloading previous model...';
+    if (_engine != null || _androidContextId != null || isLoaded.value) {
       await _fullTeardown();
-      await Future.delayed(const Duration(milliseconds: 300));
-      if (_loadingCancelled) { _resetLoadingState(); return; }
-    }
-
-    try {
-      _backend = LlamaBackend();
-      _engine = LlamaEngine(_backend!);
-    } catch (e) {
-      _backend = null;
-      _engine = null;
-      _resetLoadingState();
-      throw Exception('Failed to initialize AI engine. Error: $e');
+      await Future.delayed(const Duration(milliseconds: 200));
     }
 
     try {
       final fileSize = await file.length();
-      final sizeGb = (fileSize / (1024 * 1024 * 1024)).toStringAsFixed(2);
-      final androidSafeMode = Platform.isAndroid;
-      final contextSize = androidSafeMode ? 512 : 2048;
-      final threads = androidSafeMode ? 2 : (Platform.numberOfProcessors > 4 ? 4 : 0);
+      final sizeMb = fileSize / (1024 * 1024);
+      log?.info('Loading $filename (${sizeMb.toStringAsFixed(1)} MB)', source: 'LLM');
 
-      final storage = Get.find<ChatStorageService>();
-      GpuBackend parsedBackend;
-      switch (storage.backendType) {
-        case 'vulkan': parsedBackend = GpuBackend.vulkan; break;
-        case 'opencl': parsedBackend = GpuBackend.opencl; break;
-        default: parsedBackend = GpuBackend.cpu;
-      }
-      final params = ModelParams(
-        contextSize: contextSize,
-        gpuLayers: androidSafeMode ? 0 : storage.gpuLayers,
-        preferredBackend: androidSafeMode ? GpuBackend.cpu : parsedBackend,
-        numberOfThreads: threads,
-        numberOfThreadsBatch: threads,
-        // Android model files are already copied into app-private storage by
-        // ModelManager. Disable mmap here because mmap-backed GGUF loading can
-        // stall on some 32-bit Android filesystems even when normal file I/O
-        // and standalone llama.cpp work correctly.
-        useMmap: !androidSafeMode,
-        useMlock: false,
-      );
-
-      log?.info('Runtime config: android=$androidSafeMode cpu=${androidSafeMode ? 'forced' : 'auto'} context=$contextSize threads=$threads gpuLayers=${params.gpuLayers} mmap=${params.useMmap}', source: 'LLM');
-      final loadStopwatch = Stopwatch()..start();
-      late final Timer loadHeartbeat;
-      loadHeartbeat = Timer.periodic(const Duration(seconds: 2), (_) {
-        if (_loadingCancelled) return;
-        loadingProgress.value = 0.20;
-        loadingStatusMsg.value = 'Loading $sizeGb GB model... ${loadStopwatch.elapsed.inSeconds}s';
-      });
-      try {
-        await _engine!.loadModel(path, modelParams: params).timeout(
-          const Duration(minutes: 10),
-          onTimeout: () => throw TimeoutException('Model loading timed out after 10 minutes.'),
-        );
-      } finally {
-        loadHeartbeat.cancel();
-        loadStopwatch.stop();
+      if (_useAndroidFcllama) {
+        await _loadAndroidFcllama(path, filename, log);
+      } else {
+        await _loadLlamadart(path, filename, log);
       }
 
-      if (_loadingCancelled) { await _fullTeardown(); _resetLoadingState(); return; }
-
-      visionSupported.value = false;
-      final entities = await file.parent.list().toList();
-      final files = entities.whereType<File>().toList();
-      final stem = p.basenameWithoutExtension(filename).toLowerCase();
-      final named = files.where((f) {
-        final n = p.basename(f.path).toLowerCase();
-        return n.contains('mmproj') && n.endsWith('.gguf') && (n.contains('qwen3.5') || n.contains(stem));
-      }).toList();
-      final generic = files.where((f) {
-        final n = p.basename(f.path).toLowerCase();
-        return n.contains('mmproj') && n.endsWith('.gguf');
-      }).toList();
-      final candidates = named.isNotEmpty ? named : (generic.length == 1 ? generic : <File>[]);
-      if (candidates.isNotEmpty) {
-        try {
-          loadingStatusMsg.value = 'Loading vision projector...';
-          await _engine!.loadMultimodalProjector(candidates.first.path);
-          visionSupported.value = await _engine!.supportsVision;
-          log?.info('Vision projector loaded: ${p.basename(candidates.first.path)}', source: 'LLM');
-        } catch (e) {
-          log?.error('Vision projector unavailable: $e', source: 'LLM');
-        }
+      if (_loadingCancelled) {
+        await _fullTeardown();
+        _resetLoadingState();
+        return;
       }
 
       loadingProgress.value = 1.0;
-      loadingStatusMsg.value = visionSupported.value ? 'Model ready · Vision ready!' : 'Model ready!';
+      loadingStatusMsg.value = 'Model ready!';
       isLoaded.value = true;
       loadedModelPath.value = path;
-      await wakelockService?.enableForInference(modelName: p.basenameWithoutExtension(path));
-      await Future.delayed(const Duration(milliseconds: 300));
+      await _enableWakelock(filename);
+      await Future.delayed(const Duration(milliseconds: 150));
     } catch (e) {
-      isLoaded.value = false;
-      loadedModelPath.value = '';
-      visionSupported.value = false;
       await _fullTeardown();
       final err = e.toString().toLowerCase();
-      if (err.contains('memory') || err.contains('alloc') || err.contains('oom')) throw Exception('Not enough RAM to load this model. Try a smaller model.');
-      if (err.contains('permission') || err.contains('access') || err.contains('selinux')) throw Exception('File access denied. Import the model through the app and try again.');
-      if (err.contains('timeout') || err.contains('timed out')) throw Exception('Model loading timed out. Try SmolLM2-135M first and check the model file.');
-      if (Platform.isAndroid && (err.contains('signal 11') || err.contains('segfault'))) throw Exception('Native model loader crashed. Android CPU mode is forced; try SmolLM2-135M to separate runtime problems from model size.');
+      if (err.contains('memory') || err.contains('alloc') || err.contains('oom')) {
+        throw Exception('Not enough RAM to load this GGUF. On 1 GB RAM, start with a model around 200–400 MB and context 256–512.');
+      }
+      if (err.contains('permission') || err.contains('access') || err.contains('selinux')) {
+        throw Exception('File access denied. Import the GGUF through the app and try again.');
+      }
+      if (err.contains('timeout') || err.contains('timed out')) {
+        throw Exception('Model loading timed out. Try a smaller GGUF such as SmolLM2-135M first.');
+      }
       rethrow;
     } finally {
       _resetLoadingState();
     }
   }
 
-  void _resetLoadingState() {
-    isLoadingModel.value = false;
-    loadingProgress.value = 0.0;
-    loadingStatusMsg.value = '';
-    _loadingCancelled = false;
+  Future<void> _loadAndroidFcllama(String path, String filename, LogService? log) async {
+    final llama = FCllama.instance();
+    if (llama == null) throw Exception('ARMv7 llama.cpp engine is unavailable.');
+
+    await _androidEvents?.cancel();
+    _androidEvents = llama.onTokenStream?.listen((event) {
+      final fn = event['function']?.toString();
+      if (fn == 'loadProgress') {
+        final raw = event['result'];
+        final progress = raw is num ? raw.toDouble() : double.tryParse('$raw');
+        if (progress != null) {
+          loadingProgress.value = (progress / 100.0).clamp(0.05, 0.95);
+          loadingStatusMsg.value = 'Loading $filename... ${progress.toStringAsFixed(0)}%';
+        }
+      }
+    });
+
+    loadingStatusMsg.value = 'Starting ARMv7 llama.cpp CPU engine...';
+    log?.info('ARMv7 backend: FCLlama / llama.cpp, CPU, mmap=false, mlock=false, context=256, batch=128, threads=2', source: 'LLM');
+
+    // Keep the baseline deliberately conservative for 32-bit address space.
+    // A ~200 MB GGUF must leave room for tokenizer metadata, KV cache, Flutter,
+    // and Android itself on a 1 GB device.
+    final result = await llama.initContext(
+      path,
+      nCtx: 256,
+      nBatch: 128,
+      nThreads: 2,
+      nGpuLayers: 0,
+      useMlock: false,
+      useMmap: false,
+      emitLoadProgress: true,
+    ).timeout(const Duration(minutes: 10));
+
+    if (result == null) throw Exception('ARMv7 llama.cpp returned no context.');
+    final id = result['contextId'] ?? result['context_id'];
+    if (id == null) throw Exception('ARMv7 llama.cpp failed to create a context: $result');
+    _androidContextId = id is num ? id.toDouble() : double.tryParse('$id');
+    if (_androidContextId == null || _androidContextId! <= 0) throw Exception('Invalid ARMv7 llama.cpp context id: $id');
+    loadingProgress.value = 0.95;
+    loadingStatusMsg.value = 'Finalizing model...';
   }
 
-  static final _stopPatterns = RegExp(r'<\|end\|>|<\|eot_id\|>|<\|endoftext\|>|<\|im_end\|>|<\|im_start\|>|<end_of_turn>|<start_of_turn>|<\|assistant\|>|<\|user\|>|<\|system\|>|<\|pad\|>|</s>|<s>|\[INST\]|\[/INST\]|\[end\]');
-  static final _userTurnPattern = RegExp(r'<\|user\|>|<\|im_start\|>\s*user|<start_of_turn>\s*user|\[INST\]');
+  Future<void> _loadLlamadart(String path, String filename, LogService? log) async {
+    _backend = LlamaBackend();
+    _engine = LlamaEngine(_backend!);
+    final storage = Get.find<ChatStorageService>();
+    GpuBackend parsedBackend;
+    switch (storage.backendType) {
+      case 'vulkan': parsedBackend = GpuBackend.vulkan; break;
+      case 'opencl': parsedBackend = GpuBackend.opencl; break;
+      default: parsedBackend = GpuBackend.cpu;
+    }
+    final params = ModelParams(
+      contextSize: 2048,
+      gpuLayers: storage.gpuLayers,
+      preferredBackend: parsedBackend,
+      numberOfThreads: Platform.numberOfProcessors > 4 ? 4 : 0,
+      useMmap: true,
+      useMlock: false,
+    );
+    log?.info('Runtime config: llamadart desktop/native backend, context=2048 mmap=true', source: 'LLM');
+    loadingStatusMsg.value = 'Loading $filename...';
+    await _engine!.loadModel(path, modelParams: params).timeout(const Duration(minutes: 10));
+  }
+
+  Future<void> _enableWakelock(String filename) async {
+    try { await Get.find<WakelockService>().enableForInference(modelName: p.basenameWithoutExtension(filename)); } catch (_) {}
+  }
 
   Stream<String> generate({required List<Map<String, String>> messages, String? systemPrompt, double temperature = 0.7}) async* {
-    if (_engine == null || !isLoaded.value) throw StateError('No model loaded. Call loadModel() first.');
+    if (!isLoaded.value) throw StateError('No model loaded. Call loadModel() first.');
     if (isGenerating.value) throw StateError('Another generation is already in progress.');
     isGenerating.value = true;
     tokensPerSecond.value = 0.0;
     final stopwatch = Stopwatch()..start();
     int tokenCount = 0;
-    String buffer = '';
     try {
-      final prompt = _buildPrompt(messages, systemPrompt);
-      await for (final token in _engine!.generate(prompt)) {
-        tokenCount++;
-        if (stopwatch.elapsedMilliseconds > 0) tokensPerSecond.value = tokenCount / (stopwatch.elapsedMilliseconds / 1000);
-        buffer += token;
-        if (_userTurnPattern.hasMatch(buffer)) {
-          final cleaned = buffer.replaceAll(_stopPatterns, '').replaceAll(_userTurnPattern, '').trim();
-          if (cleaned.isNotEmpty) yield cleaned;
-          break;
+      if (_useAndroidFcllama) {
+        final contextId = _androidContextId;
+        if (contextId == null) throw StateError('ARMv7 llama.cpp context is missing.');
+        final prompt = await _androidPrompt(contextId, messages, systemPrompt);
+        final controller = StreamController<String>();
+        StreamSubscription? sub;
+        sub = FCllama.instance()?.onTokenStream?.listen((event) {
+          if (event['function']?.toString() != 'completion') return;
+          final result = event['result'];
+          if (result is Map && result['token'] is String) controller.add(result['token'] as String);
+        });
+        try {
+          final completion = FCllama.instance()!.completion(
+            contextId,
+            prompt: prompt,
+            temperature: temperature,
+            nThreads: 2,
+            nPredict: 256,
+            topK: 40,
+            topP: 0.95,
+            minP: 0.05,
+            stop: const ['<|end|>', '<|eot_id|>', '<|im_end|>', '</s>'],
+            emitRealtimeCompletion: true,
+          );
+          final resultFuture = completion;
+          await for (final token in controller.stream) {
+            tokenCount++;
+            if (stopwatch.elapsedMilliseconds > 0) tokensPerSecond.value = tokenCount / (stopwatch.elapsedMilliseconds / 1000);
+            yield token;
+          }
+          await resultFuture;
+        } finally {
+          await sub?.cancel();
+          await controller.close();
         }
-        if (_stopPatterns.hasMatch(buffer)) {
-          final cleaned = buffer.replaceAll(_stopPatterns, '').trim();
-          if (cleaned.isNotEmpty) yield cleaned;
-          break;
+      } else {
+        final prompt = _buildPrompt(messages, systemPrompt);
+        await for (final token in _engine!.generate(prompt)) {
+          tokenCount++;
+          if (stopwatch.elapsedMilliseconds > 0) tokensPerSecond.value = tokenCount / (stopwatch.elapsedMilliseconds / 1000);
+          yield token;
         }
-        if (buffer.length > 40) {
-          yield buffer.substring(0, buffer.length - 30);
-          buffer = buffer.substring(buffer.length - 30);
-        }
-      }
-      if (buffer.isNotEmpty) {
-        final cleaned = buffer.replaceAll(_stopPatterns, '').replaceAll(_userTurnPattern, '').trim();
-        if (cleaned.isNotEmpty) yield cleaned;
       }
     } finally {
       stopwatch.stop();
@@ -229,45 +250,59 @@ class LlmService extends GetxService {
       lastGenerationSpeed.value = tokensPerSecond.value;
       isGenerating.value = false;
     }
+  }
+
+  Future<String> _androidPrompt(double contextId, List<Map<String, String>> messages, String? systemPrompt) async {
+    try {
+      final roleMessages = <fcllama_types.RoleContent>[];
+      if (systemPrompt != null && systemPrompt.trim().isNotEmpty) {
+        roleMessages.add(fcllama_types.RoleContent(role: 'system', content: systemPrompt));
+      }
+      for (final msg in messages) {
+        roleMessages.add(fcllama_types.RoleContent(role: msg['role'] ?? 'user', content: msg['content'] ?? ''));
+      }
+      final formatted = await FCllama.instance()?.getFormattedChat(contextId, messages: roleMessages);
+      if (formatted != null && formatted.isNotEmpty) return '$formatted<|assistant|>';
+    } catch (_) {}
+    return _buildPrompt(messages, systemPrompt);
   }
 
   Stream<String> generateChatCompletion({required List<LlamaChatMessage> messages, GenerationParams params = const GenerationParams()}) async* {
-    if (_engine == null || !isLoaded.value) throw StateError('No model loaded. Call loadModel() first.');
-    if (isGenerating.value) throw StateError('Another generation is already in progress.');
-    isGenerating.value = true;
-    tokensPerSecond.value = 0.0;
-    final stopwatch = Stopwatch()..start();
-    int tokenCount = 0;
-    try {
-      await for (final chunk in _engine!.create(messages, params: params, toolChoice: ToolChoice.none)) {
-        final choice = chunk.choices.isNotEmpty ? chunk.choices.first : null;
-        final content = choice?.delta.content;
-        if (content == null || content.isEmpty) continue;
-        tokenCount++;
-        if (stopwatch.elapsedMilliseconds > 0) tokensPerSecond.value = tokenCount / (stopwatch.elapsedMilliseconds / 1000);
-        yield content;
-      }
-    } finally {
-      stopwatch.stop();
-      lastGenerationTokens.value = tokenCount;
-      lastGenerationSpeed.value = tokensPerSecond.value;
-      isGenerating.value = false;
-    }
+    // The controller currently uses generate(). Keep this API for desktop
+    // callers and route Android through the same safe text-generation path.
+    final mapped = messages.map((m) => <String, String>{'role': m.role.name, 'content': m.content ?? ''}).toList();
+    yield* generate(messages: mapped);
   }
 
   Future<int> countTokens(String text) async {
-    if (_engine == null || !isLoaded.value) return 0;
+    if (!isLoaded.value) return 0;
+    if (_useAndroidFcllama && _androidContextId != null) {
+      try {
+        final result = await FCllama.instance()!.tokenize(_androidContextId!, text: text);
+        final tokens = result?['tokens'];
+        if (tokens is List) return tokens.length;
+      } catch (_) {}
+      return 0;
+    }
     try { return await _engine!.getTokenCount(text); } catch (_) { return 0; }
   }
 
   Future<void> stopGeneration() async {
-    _generateSub?.cancel();
-    _generateSub = null;
-    _engine?.cancelGeneration();
+    if (_useAndroidFcllama && _androidContextId != null) {
+      try { await FCllama.instance()?.stopCompletion(contextId: _androidContextId!); } catch (_) {}
+    } else {
+      _engine?.cancelGeneration();
+    }
     isGenerating.value = false;
   }
 
   Future<void> _fullTeardown() async {
+    await _androidEvents?.cancel();
+    _androidEvents = null;
+    if (_androidContextId != null) {
+      try { await FCllama.instance()?.releaseContext(_androidContextId!); } catch (_) {}
+      _androidContextId = null;
+    }
     if (_engine != null) {
       try { await _engine!.dispose(); } catch (_) {}
       _engine = null;
@@ -282,6 +317,13 @@ class LlmService extends GetxService {
   Future<void> unloadModel() async {
     await _fullTeardown();
     try { await Get.find<WakelockService>().disable(); } catch (_) {}
+  }
+
+  void _resetLoadingState() {
+    isLoadingModel.value = false;
+    loadingProgress.value = 0.0;
+    loadingStatusMsg.value = '';
+    _loadingCancelled = false;
   }
 
   String _buildPrompt(List<Map<String, String>> messages, String? systemPrompt) {
