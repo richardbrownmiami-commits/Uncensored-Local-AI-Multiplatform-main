@@ -50,32 +50,55 @@ jobs:
       - name: Get Dependencies
         run: flutter pub get
 
-      - name: Verify ARMv7 Android target
+      # Build debug separately so a later release failure can never prevent the
+      # working ARMv7 APK from being uploaded as a GitHub Actions artifact.
+      - name: Build ARMv7 debug APK
         run: flutter build apk --target-platform android-arm --debug --no-shrink --android-skip-build-dependency-validation
 
-      - name: Build APK for armeabi-v7a (32-bit)
+      - name: Verify debug APK ABI
+        run: |
+          set -euxo pipefail
+          APK=build/app/outputs/flutter-apk/app-debug.apk
+          test -f "$APK"
+          unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
+          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then
+            echo 'Unexpected non-ARMv7 native libraries found in the debug APK'
+            exit 1
+          fi
+
+      - name: Upload ARMv7 debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Uncensored-Local-AI-armeabi-v7a-debug-${{ github.run_number }}
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Build ARMv7 release APK
         run: flutter build apk --target-platform android-arm --release --no-shrink --android-skip-build-dependency-validation
 
-      - name: Verify APK ABI
+      - name: Verify release APK ABI
         run: |
           set -euxo pipefail
           APK=build/app/outputs/flutter-apk/app-release.apk
           test -f "$APK"
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
           if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then
-            echo 'Unexpected non-ARMv7 native libraries found in the APK'
+            echo 'Unexpected non-ARMv7 native libraries found in the release APK'
             exit 1
           fi
 
-      - name: Rename APK
+      - name: Rename release APK
         run: |
           mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
 
-      - name: Upload APK Artifact
+      - name: Upload release APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Uncensored-Local-AI-armeabi-v7a
+          name: Uncensored-Local-AI-armeabi-v7a-release-${{ github.run_number }}
           path: build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
+          if-no-files-found: error
           retention-days: 30
 
       - name: Create Release
@@ -91,7 +114,7 @@ jobs:
             ARMv7 uses the fcllama/llama.cpp native backend with CPU-only
             inference and app-private GGUF storage.
 
-            **Architecture:** armeabi-v7a (32-bit ARM)
+            **Architecture:** armeabi-v7a (32-bit)
             **Minimum Android:** API 29 (Android 10)
 
             Valid GGUF files are allowed to attempt loading. The application
