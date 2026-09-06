@@ -9,10 +9,13 @@ import 'wakelock_service.dart';
 import 'chat_storage_service.dart';
 import 'log_service.dart';
 
-/// Local LLM service. Android uses Flutter -> Kotlin JNI -> C++ llama.cpp -> GGUF,
-/// following the native architecture used by SmolChat.
+/// Local LLM service.
+///
+/// Android inference is now the native SmolChat architecture:
+/// Flutter -> MethodChannel -> Kotlin JNI -> C++ LLMInference -> llama.cpp -> GGUF.
+/// Desktop/iOS keep the existing llamadart path.
 class LlmService extends GetxService {
-  static const MethodChannel _native = MethodChannel('portable_ai/native_llama');
+  static const MethodChannel _native = MethodChannel('portable_ai/native_smolchat');
   LlamaEngine? _engine;
   LlamaBackend? _backend;
   bool get _useNativeAndroid => Platform.isAndroid;
@@ -47,12 +50,16 @@ class LlmService extends GetxService {
     final file = File(path);
     if (!await file.exists()) throw Exception('Model file not found: $path');
     final filename = p.basename(path);
-    if (filename.toLowerCase().endsWith('.litertlm')) throw UnsupportedError('LiteRT-LM is not supported by this GGUF engine. Use a .gguf model.');
+    if (filename.toLowerCase().endsWith('.litertlm')) {
+      throw UnsupportedError('LiteRT-LM is not supported by this GGUF engine. Use a .gguf model.');
+    }
 
     final handle = await file.open(mode: FileMode.read);
     final magic = await handle.read(4);
     await handle.close();
-    if (magic.length != 4 || String.fromCharCodes(magic) != 'GGUF') throw Exception('Invalid or corrupted GGUF file: "$filename".');
+    if (magic.length != 4 || String.fromCharCodes(magic) != 'GGUF') {
+      throw Exception('Invalid or corrupted GGUF file: "$filename".');
+    }
 
     await unloadModel();
     _loadingCancelled = false;
@@ -67,9 +74,19 @@ class LlmService extends GetxService {
         final context = storage.contextSize.clamp(128, 8192);
         final threads = storage.cpuThreads.clamp(1, 16);
         final batch = storage.batchSize.clamp(32, 1024);
-        final raw = await _native.invokeMethod<dynamic>('load', {'path': path, 'context': context, 'threads': threads, 'batch': batch});
+        final raw = await _native.invokeMethod<dynamic>('load', {
+          'path': path,
+          'contextSize': context,
+          'threads': threads,
+          'batch': batch,
+          'minP': 0.05,
+          'temperature': storage.defaultTemperature,
+          'useMmap': true,
+          'useMlock': false,
+          'storeChats': false,
+        });
         final response = raw is Map ? Map<Object?, Object?>.from(raw) : const <Object?, Object?>{};
-        if (response['ok'] != true) throw Exception(response['message']?.toString() ?? 'Native llama.cpp failed to load the GGUF.');
+        if (response['ok'] != true) throw Exception(response['message']?.toString() ?? 'Native SmolChat llama.cpp failed to load the GGUF.');
       } else {
         await _loadLlamadart(path, filename, log);
       }
@@ -100,7 +117,14 @@ class LlmService extends GetxService {
       case 'opencl': backend = GpuBackend.opencl; break;
       default: backend = GpuBackend.cpu;
     }
-    final params = ModelParams(contextSize: 2048, gpuLayers: storage.gpuLayers, preferredBackend: backend, numberOfThreads: Platform.numberOfProcessors > 4 ? 4 : 0, useMmap: true, useMlock: false);
+    final params = ModelParams(
+      contextSize: 2048,
+      gpuLayers: storage.gpuLayers,
+      preferredBackend: backend,
+      numberOfThreads: Platform.numberOfProcessors > 4 ? 4 : 0,
+      useMmap: true,
+      useMlock: false,
+    );
     log?.info('Runtime config: llamadart desktop/native backend, context=2048 mmap=true', source: 'LLM');
     await _engine!.loadModel(path, modelParams: params).timeout(const Duration(minutes: 10));
   }
@@ -114,19 +138,50 @@ class LlmService extends GetxService {
     if (isGenerating.value) throw StateError('Another generation is already in progress.');
     isGenerating.value = true;
     final watch = Stopwatch()..start();
+    int tokenPieces = 0;
     try {
-      final prompt = _buildPrompt(messages, systemPrompt);
       if (_useNativeAndroid) {
-        final text = await _native.invokeMethod<String>('generate', {'prompt': prompt, 'maxTokens': 256, 'temperature': temperature}) ?? '';
-        if (text.startsWith('ERROR:')) throw Exception(text);
-        if (text.isNotEmpty) yield text;
+        await _native.invokeMethod('temperature', {'value': temperature});
+        await _native.invokeMethod('closeConversation');
+        if (systemPrompt != null && systemPrompt.trim().isNotEmpty) {
+          await _native.invokeMethod('addMessage', {'role': 'system', 'text': systemPrompt});
+        }
+        for (final message in messages) {
+          final role = message['role'] ?? 'user';
+          final content = message['content'] ?? '';
+          if (role == 'user') {
+            // The final user message is passed to nativeStart so llama.cpp's
+            // model chat template can append the assistant generation prompt.
+            if (message == messages.last) continue;
+          }
+          await _native.invokeMethod('addMessage', {'role': role, 'text': content});
+        }
+        final last = messages.isEmpty ? '' : (messages.last['content'] ?? '');
+        await _native.invokeMethod('start', {'query': last});
+        while (true) {
+          final piece = await _native.invokeMethod<String>('step') ?? '';
+          if (piece == '[EOG]') break;
+          if (piece.isEmpty) continue;
+          tokenPieces++;
+          yield piece;
+        }
+        await _native.invokeMethod('stop');
+        final speed = await _native.invokeMethod<num>('speed');
+        tokensPerSecond.value = speed?.toDouble() ?? 0.0;
+        lastGenerationTokens.value = tokenPieces;
+        lastGenerationSpeed.value = tokensPerSecond.value;
       } else {
-        await for (final token in _engine!.generate(prompt)) yield token;
+        final prompt = _buildPrompt(messages, systemPrompt);
+        await for (final token in _engine!.generate(prompt)) {
+          tokenPieces++;
+          yield token;
+        }
+        lastGenerationTokens.value = tokenPieces;
+        lastGenerationSpeed.value = watch.elapsedMilliseconds > 0 ? tokenPieces / (watch.elapsedMilliseconds / 1000) : 0.0;
       }
     } finally {
       watch.stop();
       isGenerating.value = false;
-      lastGenerationSpeed.value = watch.elapsedMilliseconds > 0 ? 0 : 0;
     }
   }
 
@@ -142,9 +197,7 @@ class LlmService extends GetxService {
 
   Future<void> stopGeneration() async {
     if (_useNativeAndroid) {
-      try { await _native.invokeMethod('unload'); } catch (_) {}
-      isLoaded.value = false;
-      loadedModelPath.value = '';
+      try { await _native.invokeMethod('stop'); } catch (_) {}
     } else {
       _engine?.cancelGeneration();
     }
@@ -152,7 +205,9 @@ class LlmService extends GetxService {
   }
 
   Future<void> unloadModel() async {
-    if (_useNativeAndroid) { try { await _native.invokeMethod('unload'); } catch (_) {} }
+    if (_useNativeAndroid) {
+      try { await _native.invokeMethod('close'); } catch (_) {}
+    }
     if (_engine != null) { try { await _engine!.dispose(); } catch (_) {} _engine = null; }
     _backend = null;
     isLoaded.value = false;
