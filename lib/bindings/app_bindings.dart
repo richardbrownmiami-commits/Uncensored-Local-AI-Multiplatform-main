@@ -8,7 +8,7 @@ import '../services/wakelock_service.dart';
 import '../services/log_service.dart';
 import '../services/github_service.dart';
 import '../services/tool_service.dart';
-import '../services/tool_parser.dart';
+import '../services/skill_service.dart';
 import '../controllers/chat_controller.dart';
 import '../controllers/model_controller.dart';
 import '../controllers/theme_controller.dart';
@@ -26,11 +26,10 @@ class AppBindings extends Bindings {
     Get.lazyPut(() => LogService(), fenix: true);
     Get.lazyPut(() => GitHubService(), fenix: true);
     Get.lazyPut(() => ToolService(), fenix: true);
+    Get.lazyPut(() => SkillService(), fenix: true);
 
     // ── Controllers ──────────────────────────────────────────────
-    Get.put(
-      ThemeController(),
-    ); // Put instead of lazyPut since we need theme immediately
+    Get.put(ThemeController());
     Get.lazyPut(() => ChatController(), fenix: true);
     Get.lazyPut(() => ModelController(), fenix: true);
   }
