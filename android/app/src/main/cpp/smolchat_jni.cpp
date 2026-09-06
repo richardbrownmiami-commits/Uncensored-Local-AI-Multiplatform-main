@@ -10,9 +10,7 @@ static std::string toString(JNIEnv* env, jstring value) {
     return out;
 }
 
-static LLMInference* ptr(jlong handle) {
-    return reinterpret_cast<LLMInference*>(handle);
-}
+static LLMInference* ptr(jlong handle) { return reinterpret_cast<LLMInference*>(handle); }
 
 static void throwState(JNIEnv* env, const std::exception& error) {
     jclass cls = env->FindClass("java/lang/IllegalStateException");
@@ -32,10 +30,7 @@ Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeLoad(
                              (long)contextSize, tmpl.empty() ? nullptr : tmpl.c_str(),
                              nThreads, nBatch, useMmap, useMlock);
         return reinterpret_cast<jlong>(inference);
-    } catch (const std::exception& error) {
-        throwState(env, error);
-        return 0;
-    }
+    } catch (const std::exception& error) { throwState(env, error); return 0; }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -45,9 +40,14 @@ Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeAddMessage(
         const std::string text = toString(env, message);
         const std::string roleText = toString(env, role);
         ptr(handle)->addChatMessage(text.c_str(), roleText.c_str());
-    } catch (const std::exception& error) {
-        throwState(env, error);
-    }
+    } catch (const std::exception& error) { throwState(env, error); }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeClearMessages(
+    JNIEnv* env, jobject, jlong handle) {
+    try { ptr(handle)->clearMessages(); }
+    catch (const std::exception& error) { throwState(env, error); }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -56,10 +56,7 @@ Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeStart(
     try {
         const std::string text = toString(env, query);
         return ptr(handle)->startCompletion(text.c_str()) ? JNI_TRUE : JNI_FALSE;
-    } catch (const std::exception& error) {
-        throwState(env, error);
-        return JNI_FALSE;
-    }
+    } catch (const std::exception& error) { throwState(env, error); return JNI_FALSE; }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -68,20 +65,14 @@ Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeStep(
     try {
         const std::string piece = ptr(handle)->completionLoop();
         return env->NewStringUTF(piece.c_str());
-    } catch (const std::exception& error) {
-        throwState(env, error);
-        return nullptr;
-    }
+    } catch (const std::exception& error) { throwState(env, error); return nullptr; }
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeStop(
     JNIEnv* env, jobject, jlong handle) {
-    try {
-        ptr(handle)->stopCompletion();
-    } catch (const std::exception& error) {
-        throwState(env, error);
-    }
+    try { ptr(handle)->stopCompletion(); }
+    catch (const std::exception& error) { throwState(env, error); }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -92,19 +83,16 @@ Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeSetTemperature(
 }
 
 extern "C" JNIEXPORT jfloat JNICALL
-Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeSpeed(
-    JNIEnv*, jobject, jlong handle) {
+Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeSpeed(JNIEnv*, jobject, jlong handle) {
     return ptr(handle)->getResponseGenerationSpeed();
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeContextUsed(
-    JNIEnv*, jobject, jlong handle) {
+Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeContextUsed(JNIEnv*, jobject, jlong handle) {
     return ptr(handle)->getContextSizeUsed();
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeClose(
-    JNIEnv*, jobject, jlong handle) {
+Java_com_portableai_portable_1ai_1flutter_NativeSmolChat_nativeClose(JNIEnv*, jobject, jlong handle) {
     delete ptr(handle);
 }
