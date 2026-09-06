@@ -28,11 +28,13 @@ class LLMInference {
     int _nCtxUsed = 0;
 
     bool _isValidUtf8(const char* response);
+    void clearMessagesInternal();
 
 public:
     void loadModel(const char* modelPath, float minP, float temperature, bool storeChats, long contextSize,
                    const char* chatTemplate, int nThreads, int nBatch, bool useMmap, bool useMlock);
     void addChatMessage(const char* message, const char* role);
+    void clearMessages();
     float getResponseGenerationSpeed() const;
     int getContextSizeUsed() const;
     bool startCompletion(const char* query);
