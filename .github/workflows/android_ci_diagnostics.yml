@@ -1,0 +1,241 @@
+name: Android CI Diagnostics
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  FLUTTER_VERSION: '3.47.2'
+  ANDROID_NDK_VERSION: '28.2.13676358'
+  ANDROID_CMAKE_VERSION: '3.31.0'
+  SMOLLM_URL: 'https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf?download=true'
+
+jobs:
+  build-audit:
+    name: Build + static/runtime audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 cmake;3.31.0 ndk;28.2.13676358'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        run: flutter pub get
+
+      - name: Run Dart tests
+        run: flutter test
+
+      - name: Analyze Dart code
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build native SmolChat engine for ARMv7
+        run: |
+          set -euxo pipefail
+          NDK="$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}"
+          CMAKE="$ANDROID_SDK_ROOT/cmake/${ANDROID_CMAKE_VERSION}/bin/cmake"
+          SRC="$GITHUB_WORKSPACE/android/app/src/main/cpp"
+          OUT="$GITHUB_WORKSPACE/build/native-armv7"
+          rm -rf "$OUT"
+          mkdir -p android/app/src/main/jniLibs/armeabi-v7a
+          "$CMAKE" \
+            -S "$SRC" \
+            -B "$OUT" \
+            -G Ninja \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_SYSTEM_VERSION=29 \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_ABI=armeabi-v7a \
+            -DCMAKE_ANDROID_ARCH_ABI=armeabi-v7a \
+            -DANDROID_NDK="$NDK" \
+            -DCMAKE_ANDROID_NDK="$NDK" \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp' \
+            -DCMAKE_CXX_FLAGS='-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp'
+          "$CMAKE" --build "$OUT" --target smolchat_native --parallel 2
+          find "$OUT" -name 'libsmolchat_native.so' -print -exec cp {} android/app/src/main/jniLibs/armeabi-v7a/libsmolchat_native.so \;
+          test -s android/app/src/main/jniLibs/armeabi-v7a/libsmolchat_native.so
+          file android/app/src/main/jniLibs/armeabi-v7a/libsmolchat_native.so
+          readelf -h android/app/src/main/jniLibs/armeabi-v7a/libsmolchat_native.so | grep -E 'Class:|Machine:'
+
+      - name: Build debug app and instrumentation APK
+        run: |
+          set -euxo pipefail
+          flutter build apk --target-platform android-arm --debug --no-shrink --android-skip-build-dependency-validation
+          ./gradlew :app:assembleDebugAndroidTest --no-daemon --stacktrace
+
+      - name: Audit APK contents and bundled AI assets
+        run: |
+          set -euxo pipefail
+          APK=build/app/outputs/flutter-apk/app-debug.apk
+          TEST_APK=android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          test -f "$APK"
+          test -f "$TEST_APK"
+          unzip -l "$APK" | grep -E 'lib/armeabi-v7a/libsmolchat_native\.so'
+          unzip -l "$APK" | grep -E 'assets/flutter_assets/assets/ai/(soul|identity|SKILLS|TOOLS|MEMORY|PROMPT)\.md'
+          unzip -l "$APK" | grep -E 'assets/flutter_assets/assets/ai/MODEL_CONFIG\.json'
+          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/libsmolchat_native\.so'; then exit 1; fi
+          echo 'APK audit passed: ARMv7 SmolChat engine and AI prompt assets are packaged.'
+
+      - name: Download CI GGUF
+        run: |
+          set -euxo pipefail
+          mkdir -p ci-model
+          curl -L --fail --retry 3 --retry-delay 2 "$SMOLLM_URL" -o ci-model/ci-model.gguf
+          test "$(stat -c%s ci-model/ci-model.gguf)" -gt 100000000
+          xxd -l 4 ci-model/ci-model.gguf
+          echo "CI_MODEL_BYTES=$(stat -c%s ci-model/ci-model.gguf)" >> "$GITHUB_ENV"
+
+      - name: Upload build and CI model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-ci-diagnostics-${{ github.run_number }}
+          path: |
+            build/app/outputs/flutter-apk/app-debug.apk
+            android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            ci-model/ci-model.gguf
+          retention-days: 7
+
+  device-test:
+    name: ARM Android device GGUF test (Firebase Test Lab)
+    needs: build-audit
+    if: ${{ vars.FTL_PROJECT_ID != '' && secrets.GCP_SA_KEY != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-ci-diagnostics-${{ github.run_number }}
+          path: ci-artifacts
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.FTL_PROJECT_ID }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Discover ARMv7 Test Lab device
+        id: device
+        env:
+          REQUESTED_MODEL: ${{ vars.FTL_DEVICE_MODEL }}
+          REQUESTED_VERSION: ${{ vars.FTL_DEVICE_VERSION }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REQUESTED_MODEL" ] && [ -n "$REQUESTED_VERSION" ]; then
+            echo "model=$REQUESTED_MODEL" >> "$GITHUB_OUTPUT"
+            echo "version=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using configured device: $REQUESTED_MODEL / API $REQUESTED_VERSION"
+            exit 0
+          fi
+
+          gcloud firebase test android models list --format=json > /tmp/models.json
+          python3 - <<'PY'
+          import json
+          data=json.load(open('/tmp/models.json'))
+          candidates=[]
+          for m in data:
+              if 'deprecated' in [str(x).lower() for x in m.get('tags',[])]:
+                  continue
+              abis=[str(x) for x in m.get('supportedAbis',[])]
+              if not any('armeabi-v7a' in abi for abi in abis):
+                  continue
+              versions=[]
+              for v in m.get('supportedVersionIds',[]):
+                  try:
+                      if int(str(v).split(':')[-1]) >= 29:
+                          versions.append(str(v).split(':')[-1])
+                  except ValueError:
+                      pass
+              if versions:
+                  candidates.append((m.get('formFactor',''), m.get('id',''), versions[-1], abis))
+          if not candidates:
+              raise SystemExit('No currently available Test Lab device advertises armeabi-v7a with Android API >= 29.')
+          candidates.sort(key=lambda x: (x[0] != 'PHONE', x[1]))
+          form, model, version, abis = candidates[0]
+          print('ARMv7 candidates:', len(candidates))
+          print('Selected:', form, model, 'API', version, 'ABIs', abis)
+          open('/tmp/device.env','w').write(f'model={model}\nversion={version}\n')
+          PY
+          cat /tmp/device.env >> "$GITHUB_OUTPUT"
+
+      - name: Run native GGUF load + generation on ARMv7
+        id: ftl
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p ftl-results
+          APP=$(find ci-artifacts -name app-debug.apk -print -quit)
+          TEST=$(find ci-artifacts -name app-debug-androidTest.apk -print -quit)
+          MODEL=$(find ci-artifacts -name ci-model.gguf -print -quit)
+          echo "APP=$APP"
+          echo "TEST=$TEST"
+          echo "MODEL=$MODEL"
+          gcloud firebase test android run \
+            --type instrumentation \
+            --app "$APP" \
+            --test "$TEST" \
+            --device model=${{ steps.device.outputs.model }},version=${{ steps.device.outputs.version }},locale=en,orientation=portrait \
+            --other-files /sdcard/Android/data/com.portableai.portable_ai_flutter/files/ci-model.gguf="$MODEL" \
+            --test-targets 'class com.portableai.portable_ai_flutter.NativeSmolChatInstrumentationTest' \
+            --timeout 15m \
+            --num-flaky-test-attempts 1 \
+            --client-details matrixLabel="Uncensored-Local-AI ARMv7 native GGUF CI ${{ github.sha }}" \
+            2>&1 | tee ftl-results/test-lab.log
+          echo "FTL_EXIT=${PIPESTATUS[0]}" | tee -a ftl-results/test-lab.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload Test Lab command log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firebase-test-lab-log-${{ github.run_number }}
+          path: ftl-results/test-lab.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail CI if device test failed
+        if: steps.ftl.outcome == 'failure'
+        run: |
+          echo 'ARMv7 device test failed. The Test Lab log above is the first diagnostic artifact.'
+          exit 1
+
+  no-device-configured:
+    name: Report missing Test Lab configuration
+    needs: build-audit
+    if: ${{ vars.FTL_PROJECT_ID == '' || secrets.GCP_SA_KEY == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain device test configuration
+        run: |
+          echo 'Build/audit completed, but Firebase Test Lab was not configured.'
+          echo 'Set repository variable FTL_PROJECT_ID and secret GCP_SA_KEY to enable automatic ARMv7 device testing.'
+          echo 'Optional repository variables: FTL_DEVICE_MODEL and FTL_DEVICE_VERSION.'
+          echo 'The build still fails on any compile, Flutter test, analyzer, APK audit, or bundled-AI-asset problem.'
