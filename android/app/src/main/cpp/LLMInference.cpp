@@ -8,20 +8,53 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+namespace {
+static int countTokens(const llama_vocab* vocab, const std::string& text) {
+    const int n = llama_tokenize(vocab, text.c_str(), (int)text.size(), nullptr, 0, true, true);
+    return n < 0 ? -n : n;
+}
+
+static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int batchSize) {
+    if (tokens.empty()) return false;
+    for (int start = 0; start < (int)tokens.size(); start += batchSize) {
+        const int count = std::min(batchSize, (int)tokens.size() - start);
+        llama_batch batch = llama_batch_init(count, 0, 1);
+        if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
+            llama_batch_free(batch);
+            return false;
+        }
+        for (int i = 0; i < count; ++i) {
+            const int index = start + i;
+            batch.token[i] = tokens[index];
+            batch.pos[i] = index;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = (index == (int)tokens.size() - 1);
+        }
+        const int rc = llama_decode(ctx, batch);
+        llama_batch_free(batch);
+        if (rc != 0) return false;
+    }
+    return true;
+}
+}
+
 void LLMInference::loadModel(const char* modelPath, float minP, float temperature, bool storeChats,
                              long contextSize, const char* chatTemplate, int nThreads, int nBatch,
                              bool useMmap, bool useMlock) {
-    LOGI("loadModel path=%s ctx=%ld batch=%d threads=%d mmap=%d mlock=%d",
-         modelPath, contextSize, nBatch, nThreads, useMmap, useMlock);
+    (void) useMmap;
+    (void) useMlock;
+    LOGI("loadModel path=%s ctx=%ld batch=%d threads=%d", modelPath, contextSize, nBatch, nThreads);
     llama_backend_init();
+
     llama_model_params modelParams = llama_model_default_params();
     modelParams.n_gpu_layers = 0;
     _model = llama_model_load_from_file(modelPath, modelParams);
     if (!_model) throw std::runtime_error("llama.cpp failed to load GGUF model");
 
     llama_context_params ctxParams = llama_context_default_params();
-    ctxParams.n_ctx = contextSize > 0 ? contextSize : 512;
-    ctxParams.n_batch = nBatch > 0 ? nBatch : ctxParams.n_ctx;
+    ctxParams.n_ctx = contextSize > 0 ? contextSize : 2048;
+    ctxParams.n_batch = nBatch > 0 ? std::min<int>(nBatch, (int)ctxParams.n_ctx) : 128;
     ctxParams.n_ubatch = ctxParams.n_batch;
     ctxParams.n_threads = nThreads > 0 ? nThreads : 2;
     ctxParams.n_threads_batch = ctxParams.n_threads;
@@ -36,13 +69,11 @@ void LLMInference::loadModel(const char* modelPath, float minP, float temperatur
     llama_sampler_chain_add(_sampler, llama_sampler_init_temp(temperature));
     llama_sampler_chain_add(_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
-    _formattedMessages = std::vector<char>(llama_n_ctx(_ctx));
-    clearMessagesInternal();
     _response.clear();
     _cacheResponseTokens.clear();
+    _promptTokens.clear();
     _ownedChatTemplate.clear();
     _chatTemplate = nullptr;
-
     if (chatTemplate && *chatTemplate) {
         _ownedChatTemplate = chatTemplate;
         _chatTemplate = _ownedChatTemplate.c_str();
@@ -54,6 +85,9 @@ void LLMInference::loadModel(const char* modelPath, float minP, float temperatur
         }
     }
     _storeChats = storeChats;
+    _nCtxUsed = 0;
+    _responseNumTokens = 0;
+    _responseGenerationTime = 0;
 }
 
 void LLMInference::clearMessagesInternal() {
@@ -68,6 +102,8 @@ void LLMInference::clearMessages() {
     clearMessagesInternal();
     _response.clear();
     _cacheResponseTokens.clear();
+    _promptTokens.clear();
+    _nCtxUsed = 0;
     if (_ctx) llama_memory_clear(llama_get_memory(_ctx), true);
 }
 
@@ -83,17 +119,18 @@ float LLMInference::getResponseGenerationSpeed() const {
 int LLMInference::getContextSizeUsed() const { return _nCtxUsed; }
 
 bool LLMInference::startCompletion(const char* query) {
+    if (!_ctx || !_model || !_sampler) throw std::runtime_error("Native model is not initialized");
+
     _response.clear();
     _cacheResponseTokens.clear();
     _responseGenerationTime = 0;
     _responseNumTokens = 0;
     addChatMessage(query, "user");
+    llama_memory_clear(llama_get_memory(_ctx), true);
 
     const auto* vocab = llama_model_get_vocab(_model);
     const uint32_t contextSize = llama_n_ctx(_ctx);
-    // Always leave room for a useful answer. llama.cpp treats the context as the
-    // combined prompt + generated-token window, so a full prompt cannot start decoding.
-    const int responseReserve = std::min<int>(256, std::max<int>(64, contextSize / 8));
+    const int responseReserve = std::min<int>(256, std::max<int>(64, (int)contextSize / 8));
 
     auto templates = common_chat_templates_init(_model, _chatTemplate ? _chatTemplate : "");
     common_chat_templates_inputs inputs;
@@ -101,11 +138,8 @@ bool LLMInference::startCompletion(const char* query) {
     inputs.chat_template_kwargs["tools"] = "[]";
 
     std::string prompt;
-    bool usedJinja = true;
     int tokenCount = 0;
 
-    // Prefer structural trimming: preserve the system message and newest user turn,
-    // while dropping the oldest conversation turns until prompt + response reserve fit.
     while (true) {
         std::vector<common_chat_msg> messages;
         messages.reserve(_messages.size());
@@ -119,62 +153,42 @@ bool LLMInference::startCompletion(const char* query) {
         try {
             prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
         } catch (const std::exception& error) {
-            LOGE("Jinja chat template failed: %s; using legacy renderer", error.what());
+            LOGE("Jinja chat template failed: %s", error.what());
             inputs.use_jinja = false;
             inputs.chat_template_kwargs.clear();
             prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
-            usedJinja = false;
         }
 
-        tokenCount = -llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(), nullptr, 0, true, true);
+        tokenCount = countTokens(vocab, prompt);
         if (tokenCount <= 0) throw std::runtime_error("llama.cpp could not tokenize the rendered chat prompt");
-
         if (tokenCount + responseReserve < (int)contextSize || _messages.size() <= 2) break;
 
-        // Keep index 0 (system) and the final user message. Remove the oldest
-        // non-system turn and retry rendering so the chat template stays valid.
         size_t removeIndex = 1;
         if (_messages.size() <= removeIndex + 1) break;
         free(const_cast<char*>(_messages[removeIndex].role));
         free(const_cast<char*>(_messages[removeIndex].content));
         _messages.erase(_messages.begin() + (long)removeIndex);
-        LOGI("Context trim: removed oldest chat turn; promptTokens=%d ctx=%u reserve=%d",
-             tokenCount, contextSize, responseReserve);
+        LOGI("Context trim: removed oldest turn; promptTokens=%d ctx=%u reserve=%d", tokenCount, contextSize, responseReserve);
     }
 
-    // If the fixed system prompt itself is too large, trim its rendered token budget
-    // rather than throwing. This is a last-resort guard; normal chats should use the
-    // structural history trimming above.
     if (tokenCount + responseReserve >= (int)contextSize) {
-        const int maxPromptTokens = std::max<int>(32, (int)contextSize - responseReserve - 1);
-        if (tokenCount > maxPromptTokens) {
-            _promptTokens.resize((size_t)tokenCount);
-            const int written = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(),
-                                               _promptTokens.data(), tokenCount, true, true);
-            if (written < 0) throw std::runtime_error("llama.cpp prompt tokenization failed");
-            _promptTokens.resize((size_t)maxPromptTokens);
-            LOGE("Prompt reached context limit; retaining first %d of %d prompt tokens",
-                 maxPromptTokens, tokenCount);
-            delete _batch;
-            _batch = new llama_batch();
-            _batch->token = _promptTokens.data();
-            _batch->n_tokens = _promptTokens.size();
-            _nCtxUsed = maxPromptTokens;
-            return usedJinja;
-        }
+        throw std::runtime_error("system prompt and user message exceed native context; reduce prompt/skills/tools or increase context");
     }
 
     _promptTokens.resize((size_t)tokenCount);
-    const int written = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(), _promptTokens.data(), tokenCount, true, true);
+    const int written = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(),
+                                       _promptTokens.data(), tokenCount, true, true);
     if (written < 0) throw std::runtime_error("llama.cpp prompt tokenization failed");
+    if (written != tokenCount) _promptTokens.resize((size_t)written);
 
-    delete _batch;
-    _batch = new llama_batch();
-    _batch->token = _promptTokens.data();
-    _batch->n_tokens = _promptTokens.size();
-    _nCtxUsed = tokenCount;
-    LOGI("Completion promptTokens=%d ctx=%u responseReserve=%d", tokenCount, contextSize, responseReserve);
-    return usedJinja;
+    const int batchSize = std::max(1, std::min<int>(128, (int)llama_n_batch(_ctx)));
+    if (!decodePrompt(_ctx, _promptTokens, batchSize)) {
+        throw std::runtime_error("llama_decode failed while processing prompt");
+    }
+
+    _nCtxUsed = (int)_promptTokens.size();
+    LOGI("Completion promptTokens=%d ctx=%u responseReserve=%d", _nCtxUsed, contextSize, responseReserve);
+    return true;
 }
 
 bool LLMInference::_isValidUtf8(const char* response) {
@@ -197,35 +211,48 @@ bool LLMInference::_isValidUtf8(const char* response) {
 }
 
 std::string LLMInference::completionLoop() {
+    if (!_ctx || !_model || !_sampler) throw std::runtime_error("Native model is not initialized");
     const uint32_t contextSize = llama_n_ctx(_ctx);
-    const int responseReserve = std::min<int>(256, std::max<int>(64, contextSize / 8));
+    const int responseReserve = std::min<int>(256, std::max<int>(64, (int)contextSize / 8));
 
-    const int memoryUsed = (int)llama_memory_seq_pos_max(llama_get_memory(_ctx), 0) + 1;
-    if (memoryUsed + (int)_batch->n_tokens + responseReserve >= (int)contextSize) {
-        LOGI("Generation budget exhausted: used=%d batch=%zu ctx=%u reserve=%d",
-             memoryUsed, _batch->n_tokens, contextSize, responseReserve);
-        _nCtxUsed = memoryUsed;
+    if (_nCtxUsed + responseReserve >= (int)contextSize) {
+        LOGI("Generation budget exhausted: used=%d ctx=%u reserve=%d", _nCtxUsed, contextSize, responseReserve);
         return "[EOG]";
     }
 
     const auto start = ggml_time_us();
-    if (llama_decode(_ctx, *_batch) < 0) throw std::runtime_error("llama_decode failed");
-    _nCtxUsed = (int)llama_memory_seq_pos_max(llama_get_memory(_ctx), 0) + 1;
-    _currToken = llama_sampler_sample(_sampler, _ctx, -1);
-    if (llama_vocab_is_eog(llama_model_get_vocab(_model), _currToken)) {
+    const llama_token token = llama_sampler_sample(_sampler, _ctx, -1);
+    llama_sampler_accept(_sampler, token);
+
+    if (llama_vocab_is_eog(llama_model_get_vocab(_model), token)) {
         if (_storeChats) addChatMessage(_response.c_str(), "assistant");
         return "[EOG]";
     }
 
-    char pieceBuffer[4096];
-    const int pieceLength = llama_token_to_piece(llama_model_get_vocab(_model), _currToken,
-                                                  pieceBuffer, sizeof(pieceBuffer), 0, true);
-    if (pieceLength > 0) _cacheResponseTokens.append(pieceBuffer, pieceLength);
+    llama_batch batch = llama_batch_init(1, 0, 1);
+    if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
+        llama_batch_free(batch);
+        throw std::runtime_error("llama.cpp could not allocate generation batch");
+    }
+    batch.token[0] = token;
+    batch.pos[0] = _nCtxUsed;
+    batch.n_seq_id[0] = 1;
+    batch.seq_id[0][0] = 0;
+    batch.logits[0] = true;
+
+    const int rc = llama_decode(_ctx, batch);
+    llama_batch_free(batch);
+    if (rc != 0) throw std::runtime_error("llama_decode failed during token generation");
+
+    _nCtxUsed++;
     const auto end = ggml_time_us();
     _responseGenerationTime += end - start;
     _responseNumTokens++;
-    _batch->token = &_currToken;
-    _batch->n_tokens = 1;
+
+    char pieceBuffer[4096];
+    const int pieceLength = llama_token_to_piece(llama_model_get_vocab(_model), token,
+                                                  pieceBuffer, sizeof(pieceBuffer), 0, true);
+    if (pieceLength > 0) _cacheResponseTokens.append(pieceBuffer, pieceLength);
 
     if (_isValidUtf8(_cacheResponseTokens.c_str())) {
         _response += _cacheResponseTokens;
@@ -255,7 +282,6 @@ void LLMInference::setTemperature(float temperature) {
 
 LLMInference::~LLMInference() {
     clearMessagesInternal();
-    delete _batch;
     if (_sampler) llama_sampler_free(_sampler);
     if (_ctx) llama_free(_ctx);
     if (_model) llama_model_free(_model);
