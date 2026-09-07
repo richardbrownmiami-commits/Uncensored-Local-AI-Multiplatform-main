@@ -9,6 +9,7 @@ import '../services/log_service.dart';
 import '../services/github_service.dart';
 import '../services/tool_service.dart';
 import '../services/skill_service.dart';
+import '../services/prompt_context_service.dart';
 import '../controllers/chat_controller.dart';
 import '../controllers/model_controller.dart';
 import '../controllers/theme_controller.dart';
@@ -17,7 +18,7 @@ import '../controllers/theme_controller.dart';
 class AppBindings extends Bindings {
   @override
   void dependencies() {
-    // ── Services (async init happens in splash) ──────────────────
+    Get.lazyPut(() => PromptContextService(), fenix: true);
     Get.lazyPut(() => LlmService(), fenix: true);
     Get.lazyPut(() => ModelManager(), fenix: true);
     Get.lazyPut(() => ChatStorageService(), fenix: true);
@@ -28,7 +29,6 @@ class AppBindings extends Bindings {
     Get.lazyPut(() => ToolService(), fenix: true);
     Get.lazyPut(() => SkillService(), fenix: true);
 
-    // ── Controllers ──────────────────────────────────────────────
     Get.put(ThemeController());
     Get.lazyPut(() => ChatController(), fenix: true);
     Get.lazyPut(() => ModelController(), fenix: true);
