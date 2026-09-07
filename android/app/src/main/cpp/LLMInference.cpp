@@ -14,26 +14,48 @@ static int countTokens(const llama_vocab* vocab, const std::string& text) {
     return n < 0 ? -n : n;
 }
 
-static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int batchSize) {
+// Android ARMv7 can fail a large prompt decode even when the total prompt
+// fits the context. llama.cpp itself uses smaller batch views and retries
+// with a smaller batch after decode failure. Do the same here instead of
+// turning a native decode failure into an opaque Flutter exception.
+static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int requestedBatch) {
     if (tokens.empty()) return false;
-    for (int start = 0; start < (int)tokens.size(); start += batchSize) {
-        const int count = std::min(batchSize, (int)tokens.size() - start);
-        llama_batch batch = llama_batch_init(count, 0, 1);
-        if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
+    int batchSize = std::max(1, requestedBatch);
+    batchSize = std::min(batchSize, 32); // conservative for 32-bit Android
+
+    for (int start = 0; start < (int)tokens.size();) {
+        int count = std::min(batchSize, (int)tokens.size() - start);
+        bool decoded = false;
+
+        while (!decoded) {
+            llama_batch batch = llama_batch_init(count, 0, 1);
+            if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
+                llama_batch_free(batch);
+                return false;
+            }
+
+            for (int i = 0; i < count; ++i) {
+                const int index = start + i;
+                batch.token[i] = tokens[index];
+                batch.pos[i] = index;
+                batch.n_seq_id[i] = 1;
+                batch.seq_id[i][0] = 0;
+                batch.logits[i] = (index == (int)tokens.size() - 1);
+            }
+
+            const int rc = llama_decode(ctx, batch);
             llama_batch_free(batch);
-            return false;
+
+            if (rc == 0) {
+                decoded = true;
+                start += count;
+                break;
+            }
+
+            LOGE("llama_decode prompt batch failed rc=%d start=%d count=%d", rc, start, count);
+            if (count == 1) return false;
+            count = std::max(1, count / 2);
         }
-        for (int i = 0; i < count; ++i) {
-            const int index = start + i;
-            batch.token[i] = tokens[index];
-            batch.pos[i] = index;
-            batch.n_seq_id[i] = 1;
-            batch.seq_id[i][0] = 0;
-            batch.logits[i] = (index == (int)tokens.size() - 1);
-        }
-        const int rc = llama_decode(ctx, batch);
-        llama_batch_free(batch);
-        if (rc != 0) return false;
     }
     return true;
 }
@@ -55,7 +77,7 @@ void LLMInference::loadModel(const char* modelPath, float minP, float temperatur
     llama_context_params ctxParams = llama_context_default_params();
     ctxParams.n_ctx = contextSize > 0 ? contextSize : 2048;
     ctxParams.n_batch = nBatch > 0 ? std::min<int>(nBatch, (int)ctxParams.n_ctx) : 128;
-    ctxParams.n_ubatch = ctxParams.n_batch;
+    ctxParams.n_ubatch = std::min<uint32_t>(ctxParams.n_batch, 32);
     ctxParams.n_threads = nThreads > 0 ? nThreads : 2;
     ctxParams.n_threads_batch = ctxParams.n_threads;
     ctxParams.no_perf = true;
@@ -183,9 +205,9 @@ bool LLMInference::startCompletion(const char* query) {
     if (written < 0) throw std::runtime_error("llama.cpp prompt tokenization failed");
     if (written != tokenCount) _promptTokens.resize((size_t)written);
 
-    const int batchSize = std::max(1, std::min<int>(128, (int)llama_n_batch(_ctx)));
+    const int batchSize = std::max(1, std::min<int>(32, (int)llama_n_batch(_ctx)));
     if (!decodePrompt(_ctx, _promptTokens, batchSize)) {
-        throw std::runtime_error("llama_decode failed while processing prompt");
+        throw std::runtime_error("llama_decode failed while processing prompt; native batch was retried down to 1 token");
     }
 
     _nCtxUsed = (int)_promptTokens.size();
