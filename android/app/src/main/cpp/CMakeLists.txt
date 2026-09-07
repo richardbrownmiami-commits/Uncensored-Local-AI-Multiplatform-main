@@ -66,7 +66,9 @@ target_compile_options(smolchat_native PRIVATE
 
 target_compile_definitions(smolchat_native PRIVATE GGML_USE_CPU=1)
 
-target_link_libraries(smolchat_native PRIVATE android log llama common)
+# llama.cpp's common utility target is named llama-common, not common.
+# Keep the common layer because LLMInference uses llama.cpp chat/template helpers.
+target_link_libraries(smolchat_native PRIVATE android log llama-common llama)
 target_link_options(smolchat_native PRIVATE
   -Wl,--gc-sections
   -Wl,--exclude-libs,ALL
