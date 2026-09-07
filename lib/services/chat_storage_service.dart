@@ -57,13 +57,16 @@ class ChatStorageService extends GetxService {
   set backendType(String value) => _settingsBox.put('backend_type', value);
 
   // Native Android llama.cpp tuning. These are user-configurable and are not
-  // model-size restrictions. 2048 is the practical default for chat so the
-  // built-in system prompt plus a normal user message fit without immediately
-  // exhausting the KV cache on low-memory devices.
+  // model-size restrictions.
   int get contextSize => (_settingsBox.get('context_size', defaultValue: 2048) as num).toInt();
   set contextSize(int value) => _settingsBox.put('context_size', value);
   int get cpuThreads => (_settingsBox.get('cpu_threads', defaultValue: 2) as num).toInt();
   set cpuThreads(int value) => _settingsBox.put('cpu_threads', value);
   int get batchSize => (_settingsBox.get('batch_size', defaultValue: 128) as num).toInt();
   set batchSize(int value) => _settingsBox.put('batch_size', value);
+
+  /// Persistent user/application memory. The bundled MEMORY.md is the seed;
+  /// this value is the editable on-device memory layer.
+  String get persistentMemory => _settingsBox.get('persistent_memory', defaultValue: '') as String;
+  set persistentMemory(String value) => _settingsBox.put('persistent_memory', value);
 }
