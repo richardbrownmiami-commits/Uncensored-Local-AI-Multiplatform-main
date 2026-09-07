@@ -3,7 +3,7 @@ import 'package:hive/hive.dart';
 
 import '../models/chat_model.dart';
 
-/// Persistence layer for chats using Hive.
+/// Persistence layer for chats and editable AI runtime configuration.
 class ChatStorageService extends GetxService {
   late Box<ChatModel> _chatsBox;
   late Box _settingsBox;
@@ -49,15 +49,13 @@ class ChatStorageService extends GetxService {
   int get localApiServerPort => (_settingsBox.get('local_api_server_port', defaultValue: 4891) as num).toInt();
   set localApiServerPort(int value) => _settingsBox.put('local_api_server_port', value);
   bool get localApiAllInterfaces => _settingsBox.get('local_api_all_interfaces', defaultValue: false) as bool;
-  set localApiAllInterfaces(bool value) => _settingsBox.put('local_api_all_interfaces', value);
+  set localApiAllInterfaces(bool value) => _settingsBox.put('local_api_server_all_interfaces', value);
 
   int get gpuLayers => (_settingsBox.get('gpu_layers', defaultValue: 0) as num).toInt();
   set gpuLayers(int value) => _settingsBox.put('gpu_layers', value);
   String get backendType => _settingsBox.get('backend_type', defaultValue: 'cpu') as String;
   set backendType(String value) => _settingsBox.put('backend_type', value);
 
-  // Native Android llama.cpp tuning. These are user-configurable and are not
-  // model-size restrictions.
   int get contextSize => (_settingsBox.get('context_size', defaultValue: 2048) as num).toInt();
   set contextSize(int value) => _settingsBox.put('context_size', value);
   int get cpuThreads => (_settingsBox.get('cpu_threads', defaultValue: 2) as num).toInt();
@@ -65,8 +63,19 @@ class ChatStorageService extends GetxService {
   int get batchSize => (_settingsBox.get('batch_size', defaultValue: 128) as num).toInt();
   set batchSize(int value) => _settingsBox.put('batch_size', value);
 
-  /// Persistent user/application memory. The bundled MEMORY.md is the seed;
-  /// this value is the editable on-device memory layer.
   String get persistentMemory => _settingsBox.get('persistent_memory', defaultValue: '') as String;
   set persistentMemory(String value) => _settingsBox.put('persistent_memory', value);
+
+  /// Editable on-device versions of the AI core files. Empty means use the
+  /// bundled file shipped with the APK.
+  String getAiCoreFile(String name) =>
+      _settingsBox.get('ai_core_$name', defaultValue: '') as String;
+
+  Future<void> setAiCoreFile(String name, String value) async {
+    await _settingsBox.put('ai_core_$name', value);
+  }
+
+  Future<void> resetAiCoreFile(String name) async {
+    await _settingsBox.delete('ai_core_$name');
+  }
 }
