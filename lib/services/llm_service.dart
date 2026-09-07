@@ -11,7 +11,7 @@ import 'log_service.dart';
 
 /// Local LLM service.
 ///
-/// Android inference is now the native SmolChat architecture:
+/// Android inference is the native SmolChat architecture:
 /// Flutter -> MethodChannel -> Kotlin JNI -> C++ LLMInference -> llama.cpp -> GGUF.
 /// Desktop/iOS keep the existing llamadart path.
 class LlmService extends GetxService {
@@ -71,7 +71,10 @@ class LlmService extends GetxService {
       log?.info('Native load: $filename (${(size / (1024 * 1024)).toStringAsFixed(1)} MB)', source: 'LLM');
       if (_useNativeAndroid) {
         final storage = Get.find<ChatStorageService>();
-        final context = storage.contextSize.clamp(128, 8192);
+        // Existing installs may have the old 512-token default persisted.
+        // Keep the setting configurable, but do not let that legacy value make
+        // normal chat prompts immediately exhaust the native KV cache.
+        final context = storage.contextSize.clamp(2048, 8192);
         final threads = storage.cpuThreads.clamp(1, 16);
         final batch = storage.batchSize.clamp(32, 1024);
         final raw = await _native.invokeMethod<dynamic>('load', {
@@ -150,8 +153,6 @@ class LlmService extends GetxService {
           final role = message['role'] ?? 'user';
           final content = message['content'] ?? '';
           if (role == 'user') {
-            // The final user message is passed to nativeStart so llama.cpp's
-            // model chat template can append the assistant generation prompt.
             if (message == messages.last) continue;
           }
           await _native.invokeMethod('addMessage', {'role': role, 'text': content});
