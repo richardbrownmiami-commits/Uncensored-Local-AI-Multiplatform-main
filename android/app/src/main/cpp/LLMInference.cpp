@@ -104,6 +104,7 @@ void LLMInference::clearMessages() {
     _cacheResponseTokens.clear();
     _promptTokens.clear();
     _nCtxUsed = 0;
+    if (_sampler) llama_sampler_reset(_sampler);
     if (_ctx) llama_memory_clear(llama_get_memory(_ctx), true);
 }
 
@@ -127,6 +128,7 @@ bool LLMInference::startCompletion(const char* query) {
     _responseNumTokens = 0;
     addChatMessage(query, "user");
     llama_memory_clear(llama_get_memory(_ctx), true);
+    llama_sampler_reset(_sampler);
 
     const auto* vocab = llama_model_get_vocab(_model);
     const uint32_t contextSize = llama_n_ctx(_ctx);
@@ -163,7 +165,7 @@ bool LLMInference::startCompletion(const char* query) {
         if (tokenCount <= 0) throw std::runtime_error("llama.cpp could not tokenize the rendered chat prompt");
         if (tokenCount + responseReserve < (int)contextSize || _messages.size() <= 2) break;
 
-        size_t removeIndex = 1;
+        const size_t removeIndex = 1;
         if (_messages.size() <= removeIndex + 1) break;
         free(const_cast<char*>(_messages[removeIndex].role));
         free(const_cast<char*>(_messages[removeIndex].content));
@@ -222,12 +224,13 @@ std::string LLMInference::completionLoop() {
 
     const auto start = ggml_time_us();
     const llama_token token = llama_sampler_sample(_sampler, _ctx, -1);
-    llama_sampler_accept(_sampler, token);
 
     if (llama_vocab_is_eog(llama_model_get_vocab(_model), token)) {
         if (_storeChats) addChatMessage(_response.c_str(), "assistant");
         return "[EOG]";
     }
+
+    llama_sampler_accept(_sampler, token);
 
     llama_batch batch = llama_batch_init(1, 0, 1);
     if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
@@ -249,10 +252,8 @@ std::string LLMInference::completionLoop() {
     _responseGenerationTime += end - start;
     _responseNumTokens++;
 
-    char pieceBuffer[4096];
-    const int pieceLength = llama_token_to_piece(llama_model_get_vocab(_model), token,
-                                                  pieceBuffer, sizeof(pieceBuffer), 0, true);
-    if (pieceLength > 0) _cacheResponseTokens.append(pieceBuffer, pieceLength);
+    const std::string piece = common_token_to_piece(_ctx, token, true);
+    if (!piece.empty()) _cacheResponseTokens += piece;
 
     if (_isValidUtf8(_cacheResponseTokens.c_str())) {
         _response += _cacheResponseTokens;
