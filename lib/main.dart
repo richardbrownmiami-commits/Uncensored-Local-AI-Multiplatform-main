@@ -14,6 +14,7 @@ import 'controllers/theme_controller.dart';
 import 'screens/splash_screen.dart';
 import 'routes/app_routes.dart';
 import 'widgets/multimodal_floating_button.dart';
+import 'widgets/ai_core_floating_button.dart';
 
 Future<void> main() async {
   runZonedGuarded(() async {
@@ -25,7 +26,7 @@ Future<void> main() async {
     };
 
     PlatformDispatcher.instance.onError = (error, stack) {
-      debugPrint('PlatformError: $error\n$stack');
+      debugPrint('PlatformError: $error\\n$stack');
       return true;
     };
 
@@ -43,7 +44,7 @@ Future<void> main() async {
     final themeController = Get.put(ThemeController());
     runApp(PortableAIApp(themeController: themeController));
   }, (error, stack) {
-    debugPrint('Unhandled error: $error\n$stack');
+    debugPrint('Unhandled error: $error\\n$stack');
   });
 }
 
@@ -68,6 +69,7 @@ class PortableAIApp extends StatelessWidget {
           children: [
             child ?? const SizedBox.shrink(),
             const MultimodalFloatingButton(),
+            const AiCoreFloatingButton(),
           ],
         );
       },
