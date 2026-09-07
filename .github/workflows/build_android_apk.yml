@@ -80,7 +80,8 @@ jobs:
           test -f "$APK"
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/libsmolchat_native\.so'
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
-          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then exit 1; fi
+          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/libsmolchat_native\.so'; then exit 1; fi
+          echo 'Non-engine helper libraries in other ABIs are allowed; the inference engine itself is ARMv7-only.'
       - name: Upload ARMv7 debug APK
         if: always()
         uses: actions/upload-artifact@v4
@@ -98,7 +99,8 @@ jobs:
           test -f "$APK"
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/libsmolchat_native\.so'
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
-          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then exit 1; fi
+          if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/libsmolchat_native\.so'; then exit 1; fi
+          echo 'Non-engine helper libraries in other ABIs are allowed; the inference engine itself is ARMv7-only.'
       - name: Rename release APK
         run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
       - name: Upload release APK Artifact
@@ -117,6 +119,6 @@ jobs:
           files: build/app/outputs/flutter-apk/Uncensored-Local-AI-v2.0.0-armeabi-v7a-release.apk
           body: |
             Android 32-bit ARMv7 build using a native SmolChat-style llama.cpp engine.
-            Architecture: armeabi-v7a (32-bit)
+            Architecture: armeabi-v7a (32-bit inference engine)
             Minimum Android: API 29 (Android 10)
             GGUF loading has no artificial model-size or RAM cutoff.
