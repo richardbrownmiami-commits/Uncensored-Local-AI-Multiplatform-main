@@ -119,15 +119,22 @@ jobs:
   device-test:
     name: ARM Android device GGUF test (Firebase Test Lab)
     needs: build-audit
-    env:
-      HAS_FTL_KEY: ${{ secrets.GCP_SA_KEY }}
-    if: ${{ vars.FTL_PROJECT_ID != '' && env.HAS_FTL_KEY != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify mandatory Test Lab configuration
+        env:
+          FTL_PROJECT_ID: ${{ vars.FTL_PROJECT_ID }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$FTL_PROJECT_ID" || { echo 'ERROR: repository variable FTL_PROJECT_ID is missing.'; exit 1; }
+          test -n "$GCP_SA_KEY" || { echo 'ERROR: repository secret GCP_SA_KEY is missing.'; exit 1; }
+          echo 'Firebase Test Lab configuration is present. Device runtime testing is mandatory.'
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -230,18 +237,3 @@ jobs:
         run: |
           echo 'ARMv7 device test failed. The Test Lab command log is attached to this workflow run.'
           exit 1
-
-  no-device-configured:
-    name: Report missing Test Lab configuration
-    needs: build-audit
-    env:
-      HAS_FTL_KEY: ${{ secrets.GCP_SA_KEY }}
-    if: ${{ vars.FTL_PROJECT_ID == '' || env.HAS_FTL_KEY == '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Explain Test Lab configuration
-        run: |
-          echo 'Build/audit completed, but Firebase Test Lab was not configured.'
-          echo 'Set repository variable FTL_PROJECT_ID and secret GCP_SA_KEY to enable automatic ARMv7 device testing.'
-          echo 'Optional repository variables: FTL_DEVICE_MODEL and FTL_DEVICE_VERSION.'
-          echo 'The build still fails on compile, Flutter tests, analyzer, APK audit, or bundled-AI-asset problems.'
