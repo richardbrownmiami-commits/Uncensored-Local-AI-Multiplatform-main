@@ -7,6 +7,7 @@ import '../screens/settings_screen.dart';
 import '../screens/api_endpoints_screen.dart';
 import '../screens/logs_screen.dart';
 import '../screens/prompt_window_screen.dart';
+import '../screens/ai_core_files_screen.dart';
 
 class AppRoutes {
   static const splash = '/splash';
@@ -16,34 +17,16 @@ class AppRoutes {
   static const apiEndpoints = '/api-endpoints';
   static const logs = '/logs';
   static const promptWindow = '/prompt-window';
+  static const aiCoreFiles = '/ai-core-files';
 
   static final pages = [
     GetPage(name: splash, page: () => const SplashScreen()),
     GetPage(name: home, page: () => const HomeScreen()),
-    GetPage(
-      name: modelLibrary,
-      page: () => const ModelLibraryScreen(),
-      transition: Transition.rightToLeft,
-    ),
-    GetPage(
-      name: settings,
-      page: () => const SettingsScreen(),
-      transition: Transition.rightToLeft,
-    ),
-    GetPage(
-      name: apiEndpoints,
-      page: () => const ApiEndpointsScreen(),
-      transition: Transition.rightToLeft,
-    ),
-    GetPage(
-      name: logs,
-      page: () => const LogsScreen(),
-      transition: Transition.rightToLeft,
-    ),
-    GetPage(
-      name: promptWindow,
-      page: () => const PromptWindowScreen(),
-      transition: Transition.rightToLeft,
-    ),
+    GetPage(name: modelLibrary, page: () => const ModelLibraryScreen(), transition: Transition.rightToLeft),
+    GetPage(name: settings, page: () => const SettingsScreen(), transition: Transition.rightToLeft),
+    GetPage(name: apiEndpoints, page: () => const ApiEndpointsScreen(), transition: Transition.rightToLeft),
+    GetPage(name: logs, page: () => const LogsScreen(), transition: Transition.rightToLeft),
+    GetPage(name: promptWindow, page: () => const PromptWindowScreen(), transition: Transition.rightToLeft),
+    GetPage(name: aiCoreFiles, page: () => const AiCoreFilesScreen(), transition: Transition.rightToLeft),
   ];
 }
