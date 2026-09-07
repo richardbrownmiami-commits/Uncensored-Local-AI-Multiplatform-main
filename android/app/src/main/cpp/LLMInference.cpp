@@ -1,5 +1,6 @@
 #include "LLMInference.h"
 #include <android/log.h>
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -10,9 +11,6 @@
 void LLMInference::loadModel(const char* modelPath, float minP, float temperature, bool storeChats,
                              long contextSize, const char* chatTemplate, int nThreads, int nBatch,
                              bool useMmap, bool useMlock) {
-    // The pinned llama.cpp C API owns mmap/mlock policy in its default model params.
-    // Keep the public SmolChat-compatible arguments for the Flutter/JNI layer, but do
-    // not access removed fields from newer llama_model_params structs.
     LOGI("loadModel path=%s ctx=%ld batch=%d threads=%d mmap=%d mlock=%d",
          modelPath, contextSize, nBatch, nThreads, useMmap, useMlock);
     llama_backend_init();
@@ -91,36 +89,81 @@ bool LLMInference::startCompletion(const char* query) {
     _responseNumTokens = 0;
     addChatMessage(query, "user");
 
-    std::vector<common_chat_msg> messages;
-    messages.reserve(_messages.size());
-    for (const auto& message : _messages) {
-        common_chat_msg msg;
-        msg.role = message.role;
-        msg.content = message.content;
-        messages.push_back(std::move(msg));
-    }
+    const auto* vocab = llama_model_get_vocab(_model);
+    const uint32_t contextSize = llama_n_ctx(_ctx);
+    // Always leave room for a useful answer. llama.cpp treats the context as the
+    // combined prompt + generated-token window, so a full prompt cannot start decoding.
+    const int responseReserve = std::min<int>(256, std::max<int>(64, contextSize / 8));
 
     auto templates = common_chat_templates_init(_model, _chatTemplate ? _chatTemplate : "");
     common_chat_templates_inputs inputs;
-    inputs.messages = messages;
     inputs.use_jinja = true;
     inputs.chat_template_kwargs["tools"] = "[]";
 
     std::string prompt;
     bool usedJinja = true;
-    try {
-        prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
-    } catch (const std::exception& error) {
-        LOGE("Jinja chat template failed: %s; using legacy renderer", error.what());
-        inputs.use_jinja = false;
-        inputs.chat_template_kwargs.clear();
-        prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
-        usedJinja = false;
+    int tokenCount = 0;
+
+    // Prefer structural trimming: preserve the system message and newest user turn,
+    // while dropping the oldest conversation turns until prompt + response reserve fit.
+    while (true) {
+        std::vector<common_chat_msg> messages;
+        messages.reserve(_messages.size());
+        for (const auto& message : _messages) {
+            common_chat_msg msg;
+            msg.role = message.role;
+            msg.content = message.content;
+            messages.push_back(std::move(msg));
+        }
+        inputs.messages = messages;
+        try {
+            prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
+        } catch (const std::exception& error) {
+            LOGE("Jinja chat template failed: %s; using legacy renderer", error.what());
+            inputs.use_jinja = false;
+            inputs.chat_template_kwargs.clear();
+            prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
+            usedJinja = false;
+        }
+
+        tokenCount = -llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(), nullptr, 0, true, true);
+        if (tokenCount <= 0) throw std::runtime_error("llama.cpp could not tokenize the rendered chat prompt");
+
+        if (tokenCount + responseReserve < (int)contextSize || _messages.size() <= 2) break;
+
+        // Keep index 0 (system) and the final user message. Remove the oldest
+        // non-system turn and retry rendering so the chat template stays valid.
+        size_t removeIndex = 1;
+        if (_messages.size() <= removeIndex + 1) break;
+        free(const_cast<char*>(_messages[removeIndex].role));
+        free(const_cast<char*>(_messages[removeIndex].content));
+        _messages.erase(_messages.begin() + (long)removeIndex);
+        LOGI("Context trim: removed oldest chat turn; promptTokens=%d ctx=%u reserve=%d",
+             tokenCount, contextSize, responseReserve);
     }
 
-    const auto* vocab = llama_model_get_vocab(_model);
-    const int tokenCount = -llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(), nullptr, 0, true, true);
-    if (tokenCount <= 0) throw std::runtime_error("llama.cpp could not tokenize the rendered chat prompt");
+    // If the fixed system prompt itself is too large, trim its rendered token budget
+    // rather than throwing. This is a last-resort guard; normal chats should use the
+    // structural history trimming above.
+    if (tokenCount + responseReserve >= (int)contextSize) {
+        const int maxPromptTokens = std::max<int>(32, (int)contextSize - responseReserve - 1);
+        if (tokenCount > maxPromptTokens) {
+            _promptTokens.resize((size_t)tokenCount);
+            const int written = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(),
+                                               _promptTokens.data(), tokenCount, true, true);
+            if (written < 0) throw std::runtime_error("llama.cpp prompt tokenization failed");
+            _promptTokens.resize((size_t)maxPromptTokens);
+            LOGE("Prompt reached context limit; retaining first %d of %d prompt tokens",
+                 maxPromptTokens, tokenCount);
+            delete _batch;
+            _batch = new llama_batch();
+            _batch->token = _promptTokens.data();
+            _batch->n_tokens = _promptTokens.size();
+            _nCtxUsed = maxPromptTokens;
+            return usedJinja;
+        }
+    }
+
     _promptTokens.resize((size_t)tokenCount);
     const int written = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(), _promptTokens.data(), tokenCount, true, true);
     if (written < 0) throw std::runtime_error("llama.cpp prompt tokenization failed");
@@ -129,6 +172,8 @@ bool LLMInference::startCompletion(const char* query) {
     _batch = new llama_batch();
     _batch->token = _promptTokens.data();
     _batch->n_tokens = _promptTokens.size();
+    _nCtxUsed = tokenCount;
+    LOGI("Completion promptTokens=%d ctx=%u responseReserve=%d", tokenCount, contextSize, responseReserve);
     return usedJinja;
 }
 
@@ -153,11 +198,19 @@ bool LLMInference::_isValidUtf8(const char* response) {
 
 std::string LLMInference::completionLoop() {
     const uint32_t contextSize = llama_n_ctx(_ctx);
-    _nCtxUsed = (int)llama_memory_seq_pos_max(llama_get_memory(_ctx), 0) + 1;
-    if (_nCtxUsed + (int)_batch->n_tokens > (int)contextSize) throw std::runtime_error("context size reached");
+    const int responseReserve = std::min<int>(256, std::max<int>(64, contextSize / 8));
+
+    const int memoryUsed = (int)llama_memory_seq_pos_max(llama_get_memory(_ctx), 0) + 1;
+    if (memoryUsed + (int)_batch->n_tokens + responseReserve >= (int)contextSize) {
+        LOGI("Generation budget exhausted: used=%d batch=%zu ctx=%u reserve=%d",
+             memoryUsed, _batch->n_tokens, contextSize, responseReserve);
+        _nCtxUsed = memoryUsed;
+        return "[EOG]";
+    }
 
     const auto start = ggml_time_us();
     if (llama_decode(_ctx, *_batch) < 0) throw std::runtime_error("llama_decode failed");
+    _nCtxUsed = (int)llama_memory_seq_pos_max(llama_get_memory(_ctx), 0) + 1;
     _currToken = llama_sampler_sample(_sampler, _ctx, -1);
     if (llama_vocab_is_eog(llama_model_get_vocab(_model), _currToken)) {
         if (_storeChats) addChatMessage(_response.c_str(), "assistant");
