@@ -1,0 +1,15 @@
+{
+  "engine": "native-smolchat-llama.cpp",
+  "format": "GGUF",
+  "android_abi": "armeabi-v7a",
+  "min_android_api": 29,
+  "cpu_only": true,
+  "default_context": 2048,
+  "max_context": 8192,
+  "default_threads": 2,
+  "default_batch": 128,
+  "gpu_layers": 0,
+  "mmap": true,
+  "mlock": false,
+  "model_size_limit": null
+}
