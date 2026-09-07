@@ -40,13 +40,45 @@ jobs:
         run: flutter doctor
       - name: Get Dependencies
         run: flutter pub get
+
+      - name: Build native SmolChat engine for ARMv7
+        run: |
+          set -euxo pipefail
+          NDK="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+          CMAKE="$ANDROID_SDK_ROOT/cmake/3.31.0/bin/cmake"
+          SRC="$GITHUB_WORKSPACE/android/app/src/main/cpp"
+          OUT="$GITHUB_WORKSPACE/build/native-armv7"
+          rm -rf "$OUT"
+          mkdir -p android/app/src/main/jniLibs/armeabi-v7a
+          "$CMAKE" \
+            -S "$SRC" \
+            -B "$OUT" \
+            -G Ninja \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_SYSTEM_VERSION=29 \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_ABI=armeabi-v7a \
+            -DCMAKE_ANDROID_ARCH_ABI=armeabi-v7a \
+            -DANDROID_NDK="$NDK" \
+            -DCMAKE_ANDROID_NDK="$NDK" \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp' \
+            -DCMAKE_CXX_FLAGS='-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp'
+          "$CMAKE" --build "$OUT" --target smolchat_native --parallel 2
+          find "$OUT" -name 'libsmolchat_native.so' -print -exec cp {} android/app/src/main/jniLibs/armeabi-v7a/libsmolchat_native.so \;
+          test -s android/app/src/main/jniLibs/armeabi-v7a/libsmolchat_native.so
+          file android/app/src/main/jniLibs/armeabi-v7a/libsmolchat_native.so
+          readelf -h android/app/src/main/jniLibs/armeabi-v7a/libsmolchat_native.so | grep -E 'Class:|Machine:'
+
       - name: Build ARMv7 debug APK
         run: flutter build apk --target-platform android-arm --debug --no-shrink --android-skip-build-dependency-validation
-      - name: Verify debug APK ABI
+      - name: Verify debug APK ABI and native engine
         run: |
           set -euxo pipefail
           APK=build/app/outputs/flutter-apk/app-debug.apk
           test -f "$APK"
+          unzip -l "$APK" | grep -E 'lib/armeabi-v7a/libsmolchat_native\.so'
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
           if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then exit 1; fi
       - name: Upload ARMv7 debug APK
@@ -59,11 +91,12 @@ jobs:
           retention-days: 30
       - name: Build ARMv7 release APK
         run: flutter build apk --target-platform android-arm --release --no-shrink --android-skip-build-dependency-validation
-      - name: Verify release APK ABI
+      - name: Verify release APK ABI and native engine
         run: |
           set -euxo pipefail
           APK=build/app/outputs/flutter-apk/app-release.apk
           test -f "$APK"
+          unzip -l "$APK" | grep -E 'lib/armeabi-v7a/libsmolchat_native\.so'
           unzip -l "$APK" | grep -E 'lib/armeabi-v7a/'
           if unzip -l "$APK" | grep -E 'lib/(arm64-v8a|x86|x86_64)/'; then exit 1; fi
       - name: Rename release APK
