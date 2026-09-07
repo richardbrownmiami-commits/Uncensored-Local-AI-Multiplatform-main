@@ -27,12 +27,10 @@ set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
 
-# ARMv7/32-bit Android settings used by SmolChat's ARMv7 build discussion.
-# Apply them before FetchContent so llama.cpp itself receives the same target flags.
+# Portable ARMv7/32-bit Android flags used by the SmolChat ARMv7 build approach.
 if (ANDROID_ABI STREQUAL "armeabi-v7a")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp" CACHE STRING "" FORCE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp" CACHE STRING "" FORCE)
-  set(ANDROID_ARM_NEON ON CACHE BOOL "" FORCE)
 endif()
 
 include(FetchContent)
@@ -55,18 +53,16 @@ target_include_directories(smolchat_native PRIVATE
   ${llama_cpp_SOURCE_DIR}/vendor
 )
 
-if (ANDROID_ABI STREQUAL "armeabi-v7a")
-  target_compile_options(smolchat_native PRIVATE
-    -march=armv7-a
-    -mfpu=vfpv3-d16
-    -mfloat-abi=softfp
-    -O3
-    -fvisibility=hidden
-    -fvisibility-inlines-hidden
-    -ffunction-sections
-    -fdata-sections
-  )
-endif()
+target_compile_options(smolchat_native PRIVATE
+  -march=armv7-a
+  -mfpu=vfpv3-d16
+  -mfloat-abi=softfp
+  -O3
+  -fvisibility=hidden
+  -fvisibility-inlines-hidden
+  -ffunction-sections
+  -fdata-sections
+)
 
 target_compile_definitions(smolchat_native PRIVATE GGML_USE_CPU=1)
 
