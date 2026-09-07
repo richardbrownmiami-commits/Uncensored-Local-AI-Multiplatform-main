@@ -46,9 +46,7 @@ class _PromptWindowScreenState extends State<PromptWindowScreen> {
       );
       if (mounted) _output.text = result;
     } catch (e) {
-      if (mounted) {
-        _output.text = 'Error: $e';
-      }
+      if (mounted) _output.text = 'Error: $e';
     } finally {
       if (mounted) setState(() => _running = false);
     }
@@ -64,9 +62,7 @@ class _PromptWindowScreenState extends State<PromptWindowScreen> {
         _context.text = current.isEmpty ? result : '$current\n\n$result';
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
     }
   }
 
@@ -77,13 +73,14 @@ class _PromptWindowScreenState extends State<PromptWindowScreen> {
       appBar: AppBar(
         title: const Text('Prompt Window'),
         actions: [
+          IconButton(
+            tooltip: 'AI Core Files',
+            icon: const Icon(Icons.folder_special_outlined),
+            onPressed: () => Get.toNamed('/ai-core-files'),
+          ),
           Obx(() => Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Center(
-                  child: Text(llm.isLoaded.value
-                      ? llm.loadedModelFilename
-                      : 'No model loaded'),
-                ),
+                child: Center(child: Text(llm.isLoaded.value ? llm.loadedModelFilename : 'No model loaded')),
               )),
         ],
       ),
@@ -97,37 +94,30 @@ class _PromptWindowScreenState extends State<PromptWindowScreen> {
                 child: Obx(() => DropdownButtonFormField<String>(
                       value: _skillService.selectedSkillId.value,
                       decoration: const InputDecoration(labelText: 'Skill'),
-                      items: _skillService.skills
-                          .map((skill) => DropdownMenuItem(
-                                value: skill.id,
-                                child: Text(skill.name),
-                              ))
-                          .toList(),
+                      items: _skillService.skills.map((skill) => DropdownMenuItem(value: skill.id, child: Text(skill.name))).toList(),
                       onChanged: (value) {
                         if (value != null) _skillService.selectSkill(value);
                       },
                     )),
               ),
             ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => Get.toNamed('/ai-core-files'),
+              icon: const Icon(Icons.folder_special_outlined),
+              label: const Text('Edit Soul / Identity / Skills / Tools / Memory / Prompt / Model Config'),
+            ),
             const SizedBox(height: 12),
             TextField(
               controller: _system,
               maxLines: 4,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'System instructions',
-                hintText: 'Instructions injected before the user prompt',
-              ),
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'System instructions', hintText: 'Instructions injected before the user prompt'),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: _context,
               maxLines: 6,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Direct context injection',
-                hintText: 'Paste text, code, notes, documents, or tool results here',
-              ),
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Direct context injection', hintText: 'Paste text, code, notes, documents, or tool results here'),
             ),
             const SizedBox(height: 12),
             Row(
@@ -135,10 +125,7 @@ class _PromptWindowScreenState extends State<PromptWindowScreen> {
                 Expanded(
                   child: DropdownButtonFormField<ToolKind>(
                     value: _tool,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Inject tool result',
-                    ),
+                    decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Inject tool result'),
                     items: const [
                       DropdownMenuItem(value: ToolKind.dateTime, child: Text('Date / time')),
                       DropdownMenuItem(value: ToolKind.systemInfo, child: Text('System info')),
@@ -147,48 +134,22 @@ class _PromptWindowScreenState extends State<PromptWindowScreen> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                FilledButton.icon(
-                  onPressed: _tool == null ? null : _injectToolResult,
-                  icon: const Icon(Icons.add),
-                  label: const Text('Inject'),
-                ),
+                FilledButton.icon(onPressed: _tool == null ? null : _injectToolResult, icon: const Icon(Icons.add), label: const Text('Inject')),
               ],
             ),
             const SizedBox(height: 12),
             Text('Temperature: ${_temperature.toStringAsFixed(2)}'),
-            Slider(
-              value: _temperature,
-              min: 0,
-              max: 2,
-              divisions: 40,
-              onChanged: (value) => setState(() => _temperature = value),
-            ),
+            Slider(value: _temperature, min: 0, max: 2, divisions: 40, onChanged: (value) => setState(() => _temperature = value)),
             const SizedBox(height: 12),
             TextField(
               controller: _prompt,
               maxLines: 8,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Prompt',
-                hintText: 'This is sent directly to the currently loaded GGUF model',
-              ),
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Prompt', hintText: 'This is sent directly to the currently loaded GGUF model'),
             ),
             const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: _running ? null : _run,
-              icon: Icon(_running ? Icons.hourglass_top : Icons.play_arrow),
-              label: Text(_running ? 'Running…' : 'Run on loaded model'),
-            ),
+            FilledButton.icon(onPressed: _running ? null : _run, icon: Icon(_running ? Icons.hourglass_top : Icons.play_arrow), label: Text(_running ? 'Running…' : 'Run on loaded model')),
             const SizedBox(height: 16),
-            TextField(
-              controller: _output,
-              readOnly: true,
-              maxLines: 14,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Model output',
-              ),
-            ),
+            TextField(controller: _output, readOnly: true, maxLines: 14, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'Model output')),
           ],
         ),
       ),
