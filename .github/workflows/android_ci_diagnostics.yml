@@ -119,7 +119,9 @@ jobs:
   device-test:
     name: ARM Android device GGUF test (Firebase Test Lab)
     needs: build-audit
-    if: ${{ vars.FTL_PROJECT_ID != '' && secrets.GCP_SA_KEY != '' }}
+    env:
+      HAS_FTL_KEY: ${{ secrets.GCP_SA_KEY }}
+    if: ${{ vars.FTL_PROJECT_ID != '' && env.HAS_FTL_KEY != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -198,6 +200,7 @@ jobs:
           echo "APP=$APP"
           echo "TEST=$TEST"
           echo "MODEL=$MODEL"
+          set +e
           gcloud firebase test android run \
             --type instrumentation \
             --app "$APP" \
@@ -209,8 +212,9 @@ jobs:
             --num-flaky-test-attempts 1 \
             --client-details matrixLabel="Uncensored-Local-AI ARMv7 native GGUF CI ${{ github.sha }}" \
             2>&1 | tee ftl-results/test-lab.log
-          echo "FTL_EXIT=${PIPESTATUS[0]}" | tee -a ftl-results/test-lab.log
-          exit ${PIPESTATUS[0]}
+          status=${PIPESTATUS[0]}
+          echo "FTL_EXIT=$status" | tee -a ftl-results/test-lab.log
+          exit "$status"
 
       - name: Upload Test Lab command log
         if: always()
@@ -224,18 +228,20 @@ jobs:
       - name: Fail CI if device test failed
         if: steps.ftl.outcome == 'failure'
         run: |
-          echo 'ARMv7 device test failed. The Test Lab log above is the first diagnostic artifact.'
+          echo 'ARMv7 device test failed. The Test Lab command log is attached to this workflow run.'
           exit 1
 
   no-device-configured:
     name: Report missing Test Lab configuration
     needs: build-audit
-    if: ${{ vars.FTL_PROJECT_ID == '' || secrets.GCP_SA_KEY == '' }}
+    env:
+      HAS_FTL_KEY: ${{ secrets.GCP_SA_KEY }}
+    if: ${{ vars.FTL_PROJECT_ID == '' || env.HAS_FTL_KEY == '' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Explain device test configuration
+      - name: Explain Test Lab configuration
         run: |
           echo 'Build/audit completed, but Firebase Test Lab was not configured.'
           echo 'Set repository variable FTL_PROJECT_ID and secret GCP_SA_KEY to enable automatic ARMv7 device testing.'
           echo 'Optional repository variables: FTL_DEVICE_MODEL and FTL_DEVICE_VERSION.'
-          echo 'The build still fails on any compile, Flutter test, analyzer, APK audit, or bundled-AI-asset problem.'
+          echo 'The build still fails on compile, Flutter tests, analyzer, APK audit, or bundled-AI-asset problems.'
