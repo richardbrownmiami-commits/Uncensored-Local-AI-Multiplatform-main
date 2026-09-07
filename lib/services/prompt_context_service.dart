@@ -6,10 +6,18 @@ import 'package:get/get.dart';
 import 'chat_storage_service.dart';
 import 'tool_parser.dart';
 
-/// Loads the bundled AI identity/prompt/skill/tool/memory files and turns them
-/// into runtime context injected into every model generation.
+/// Loads bundled AI core files and overlays editable on-device copies.
 class PromptContextService extends GetxService {
   static const _base = 'assets/ai';
+  static const coreFileNames = <String>[
+    'soul.md',
+    'identity.md',
+    'SKILLS.md',
+    'TOOLS.md',
+    'MEMORY.md',
+    'PROMPT.md',
+    'MODEL_CONFIG.json',
+  ];
 
   String soul = '';
   String identity = '';
@@ -21,13 +29,14 @@ class PromptContextService extends GetxService {
   bool ready = false;
 
   Future<PromptContextService> init() async {
-    soul = await _load('soul.md');
-    identity = await _load('identity.md');
-    skills = await _load('SKILLS.md');
-    tools = await _load('TOOLS.md');
-    prompt = await _load('PROMPT.md');
-    memorySeed = await _load('MEMORY.md');
-    final config = await _load('MODEL_CONFIG.json');
+    final storage = Get.find<ChatStorageService>();
+    soul = await _effective('soul.md', storage);
+    identity = await _effective('identity.md', storage);
+    skills = await _effective('SKILLS.md', storage);
+    tools = await _effective('TOOLS.md', storage);
+    prompt = await _effective('PROMPT.md', storage);
+    memorySeed = await _effective('MEMORY.md', storage);
+    final config = await _effective('MODEL_CONFIG.json', storage);
     try {
       modelConfig = jsonDecode(config) as Map<String, dynamic>;
     } catch (_) {
@@ -37,13 +46,43 @@ class PromptContextService extends GetxService {
     return this;
   }
 
-  Future<String> _load(String name) async {
+  Future<String> _loadBundled(String name) async {
     try {
       return await rootBundle.loadString('$_base/$name');
     } catch (_) {
       return '';
     }
   }
+
+  Future<String> _effective(String name, ChatStorageService storage) async {
+    final override = storage.getAiCoreFile(name).trim();
+    return override.isNotEmpty ? override : await _loadBundled(name);
+  }
+
+  Future<void> saveCoreFile(String name, String value) async {
+    await Get.find<ChatStorageService>().setAiCoreFile(name, value);
+    await init();
+  }
+
+  Future<void> resetCoreFile(String name) async {
+    await Get.find<ChatStorageService>().resetAiCoreFile(name);
+    await init();
+  }
+
+  String currentCoreFile(String name) {
+    switch (name) {
+      case 'soul.md': return soul;
+      case 'identity.md': return identity;
+      case 'SKILLS.md': return skills;
+      case 'TOOLS.md': return tools;
+      case 'MEMORY.md': return memorySeed;
+      case 'PROMPT.md': return prompt;
+      case 'MODEL_CONFIG.json': return jsonEncode(modelConfig);
+      default: return '';
+    }
+  }
+
+  bool hasOverride(String name) => Get.find<ChatStorageService>().getAiCoreFile(name).trim().isNotEmpty;
 
   String buildInjection({
     required String modelFilename,
@@ -63,9 +102,7 @@ class PromptContextService extends GetxService {
     add('IDENTITY', identity);
     add('SOUL', soul);
     add('PROMPT PIPELINE', prompt);
-    if (selectedSkill.trim().isNotEmpty) {
-      add('SELECTED SKILL', selectedSkill);
-    }
+    if (selectedSkill.trim().isNotEmpty) add('SELECTED SKILL', selectedSkill);
     final memory = userMemory.trim().isNotEmpty ? userMemory : memorySeed;
     add('MEMORY', memory);
 
@@ -81,9 +118,7 @@ class PromptContextService extends GetxService {
     });
     add('MODEL CONFIG', runtime);
 
-    if (includeTools) {
-      add('TOOLS', '$tools\n\n${ToolParser.toolInstructions}');
-    }
+    if (includeTools) add('TOOLS', '$tools\n\n${ToolParser.toolInstructions}');
     return sections.join('\n\n');
   }
 }
