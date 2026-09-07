@@ -21,15 +21,9 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Native llama.cpp is prebuilt explicitly for ARMv7 by CI and packaged
+        // from src/main/jniLibs. Do not let AGP/Flutter configure CMake for arm64.
         ndk { abiFilters += setOf("armeabi-v7a") }
-        externalNativeBuild { cmake { cppFlags += listOf("-std=c++17") } }
-    }
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.31.0"
-        }
     }
 
     buildTypes {
