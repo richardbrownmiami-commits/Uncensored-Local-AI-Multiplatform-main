@@ -8,6 +8,8 @@ import 'package:path/path.dart' as p;
 import 'wakelock_service.dart';
 import 'chat_storage_service.dart';
 import 'log_service.dart';
+import 'prompt_context_service.dart';
+import 'skill_service.dart';
 
 /// Local LLM service.
 ///
@@ -71,9 +73,6 @@ class LlmService extends GetxService {
       log?.info('Native load: $filename (${(size / (1024 * 1024)).toStringAsFixed(1)} MB)', source: 'LLM');
       if (_useNativeAndroid) {
         final storage = Get.find<ChatStorageService>();
-        // Existing installs may have the old 512-token default persisted.
-        // Keep the setting configurable, but do not let that legacy value make
-        // normal chat prompts immediately exhaust the native KV cache.
         final context = storage.contextSize.clamp(2048, 8192);
         final threads = storage.cpuThreads.clamp(1, 16);
         final batch = storage.batchSize.clamp(32, 1024);
@@ -136,6 +135,27 @@ class LlmService extends GetxService {
     try { await Get.find<WakelockService>().enableForInference(modelName: p.basenameWithoutExtension(filename)); } catch (_) {}
   }
 
+  Future<String> _effectiveSystemPrompt(String supplied) async {
+    final storage = Get.find<ChatStorageService>();
+    final context = Get.find<PromptContextService>();
+    if (!context.ready) await context.init();
+    String skill = '';
+    try { skill = Get.find<SkillService>().selectedSkill.systemPrompt; } catch (_) {}
+    final runtimeInjection = context.buildInjection(
+      modelFilename: loadedModelFilename,
+      contextSize: storage.contextSize.clamp(2048, 8192),
+      threads: storage.cpuThreads.clamp(1, 16),
+      batch: storage.batchSize.clamp(32, 1024),
+      selectedSkill: skill,
+      userMemory: storage.persistentMemory,
+      includeTools: true,
+    );
+    final parts = <String>[];
+    if (supplied.trim().isNotEmpty) parts.add(supplied.trim());
+    if (runtimeInjection.trim().isNotEmpty) parts.add(runtimeInjection.trim());
+    return parts.join('\n\n');
+  }
+
   Stream<String> generate({required List<Map<String, String>> messages, String? systemPrompt, double temperature = 0.7}) async* {
     if (!isLoaded.value) throw StateError('No model loaded. Call loadModel() first.');
     if (isGenerating.value) throw StateError('Another generation is already in progress.');
@@ -143,18 +163,17 @@ class LlmService extends GetxService {
     final watch = Stopwatch()..start();
     int tokenPieces = 0;
     try {
+      final effectiveSystemPrompt = await _effectiveSystemPrompt(systemPrompt ?? '');
       if (_useNativeAndroid) {
         await _native.invokeMethod('temperature', {'value': temperature});
         await _native.invokeMethod('closeConversation');
-        if (systemPrompt != null && systemPrompt.trim().isNotEmpty) {
-          await _native.invokeMethod('addMessage', {'role': 'system', 'text': systemPrompt});
+        if (effectiveSystemPrompt.trim().isNotEmpty) {
+          await _native.invokeMethod('addMessage', {'role': 'system', 'text': effectiveSystemPrompt});
         }
         for (final message in messages) {
           final role = message['role'] ?? 'user';
           final content = message['content'] ?? '';
-          if (role == 'user') {
-            if (message == messages.last) continue;
-          }
+          if (role == 'user' && message == messages.last) continue;
           await _native.invokeMethod('addMessage', {'role': role, 'text': content});
         }
         final last = messages.isEmpty ? '' : (messages.last['content'] ?? '');
@@ -172,7 +191,7 @@ class LlmService extends GetxService {
         lastGenerationTokens.value = tokenPieces;
         lastGenerationSpeed.value = tokensPerSecond.value;
       } else {
-        final prompt = _buildPrompt(messages, systemPrompt);
+        final prompt = _buildPrompt(messages, effectiveSystemPrompt);
         await for (final token in _engine!.generate(prompt)) {
           tokenPieces++;
           yield token;
