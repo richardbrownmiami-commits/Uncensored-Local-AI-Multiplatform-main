@@ -14,27 +14,42 @@ static int countTokens(const llama_vocab* vocab, const std::string& text) {
     return n < 0 ? -n : n;
 }
 
-// Generic single-sequence prompt evaluation. The selected GGUF, its tokenizer,
-// and llama.cpp determine the actual model behavior; this function only adapts
-// the work unit to the batch capacity configured for the current device.
-static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int requestedBatch) {
-    if (tokens.empty()) return false;
+// Evaluate a single sequence using explicit token positions.  This avoids
+// relying on llama_batch_get_one() to infer KV positions across multiple
+// prompt chunks, which is especially important when a failed decode is
+// retried with a smaller work unit.
+static int decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int requestedBatch) {
+    if (tokens.empty()) return -1;
     const int batchCapacity = std::max(1, requestedBatch);
+
     for (int start = 0; start < (int)tokens.size();) {
         int count = std::min(batchCapacity, (int)tokens.size() - start);
         while (true) {
-            llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(tokens.data() + start), count);
+            llama_batch batch = llama_batch_init(count, 0, 1);
+            for (int i = 0; i < count; ++i) {
+                batch.token[i] = tokens[(size_t)start + i];
+                batch.pos[i] = start + i;
+                batch.n_seq_id[i] = 1;
+                batch.seq_id[i][0] = 0;
+                batch.logits[i] = (i == count - 1) ? 1 : 0;
+            }
+
             const int rc = llama_decode(ctx, batch);
+            llama_batch_free(batch);
             if (rc == 0) {
                 start += count;
                 break;
             }
-            LOGE("prompt decode failed rc=%d start=%d count=%d; reducing work unit", rc, start, count);
-            if (count == 1) return false;
+
+            LOGE("prompt decode failed rc=%d start=%d count=%d", rc, start, count);
+            if (count == 1) return rc;
+            // llama_decode() restores the memory state for ordinary input
+            // validation/KV-slot failures, so retry the same positions with
+            // a smaller batch rather than advancing the sequence incorrectly.
             count = std::max(1, count / 2);
         }
     }
-    return true;
+    return 0;
 }
 }
 
@@ -142,8 +157,6 @@ bool LLMInference::startCompletion(const char* query) {
     inputs.add_eos = false;
     inputs.tools.clear();
     inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_NONE;
-    // Do not force a model-specific reasoning/thinking mode. If a GGUF template
-    // supports a thinking option, its normal llama.cpp template behavior applies.
 
     std::string prompt;
     int tokenCount = 0;
@@ -194,8 +207,9 @@ bool LLMInference::startCompletion(const char* query) {
     if (written != tokenCount) _promptTokens.resize((size_t)written);
 
     const int batchSize = std::max(1, (int)llama_n_batch(_ctx));
-    if (!decodePrompt(_ctx, _promptTokens, batchSize)) {
-        throw std::runtime_error("llama_decode failed while processing the selected GGUF");
+    const int decodeRc = decodePrompt(_ctx, _promptTokens, batchSize);
+    if (decodeRc != 0) {
+        throw std::runtime_error("llama_decode failed while processing the selected GGUF (rc=" + std::to_string(decodeRc) + ")");
     }
 
     _nCtxUsed = (int)_promptTokens.size();
@@ -241,9 +255,19 @@ std::string LLMInference::completionLoop() {
 
     llama_sampler_accept(_sampler, token);
 
-    llama_batch batch = llama_batch_get_one(const_cast<llama_token*>(&token), 1);
+    // Use an explicit position for generated tokens so the native engine and
+    // KV cache always agree on the sequence position.
+    llama_batch batch = llama_batch_init(1, 0, 1);
+    batch.token[0] = token;
+    batch.pos[0] = _nCtxUsed;
+    batch.n_seq_id[0] = 1;
+    batch.seq_id[0][0] = 0;
+    batch.logits[0] = 1;
     const int rc = llama_decode(_ctx, batch);
-    if (rc != 0) throw std::runtime_error("llama_decode failed during token generation");
+    llama_batch_free(batch);
+    if (rc != 0) {
+        throw std::runtime_error("llama_decode failed during token generation (rc=" + std::to_string(rc) + ")");
+    }
 
     _nCtxUsed++;
     const auto end = ggml_time_us();
