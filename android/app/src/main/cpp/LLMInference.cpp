@@ -14,13 +14,9 @@ static int countTokens(const llama_vocab* vocab, const std::string& text) {
     return n < 0 ? -n : n;
 }
 
-// ARMv7 reliability is more important than prompt throughput. llama.cpp supports
-// decoding a view of a larger batch, so start with a small batch and fall back
-// all the way to one token if the backend rejects a graph.
 static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int requestedBatch) {
     if (tokens.empty()) return false;
     int batchSize = std::max(1, std::min(requestedBatch, 16));
-
     for (int start = 0; start < (int)tokens.size();) {
         int count = std::min(batchSize, (int)tokens.size() - start);
         while (true) {
@@ -67,9 +63,6 @@ void LLMInference::loadModel(const char* modelPath, float minP, float temperatur
 
     llama_context_params ctxParams = llama_context_default_params();
     ctxParams.n_ctx = contextSize > 0 ? contextSize : 2048;
-    // Keep the public batch setting, but force a tiny physical ubatch on ARMv7.
-    // This avoids large transient graphs that can make llama_decode fail on
-    // 32-bit devices even when the model and context fit in RAM.
     ctxParams.n_batch = nBatch > 0 ? std::min<int>(nBatch, (int)ctxParams.n_ctx) : 128;
     ctxParams.n_ubatch = 1;
     ctxParams.n_threads = nThreads > 0 ? nThreads : 2;
@@ -150,10 +143,19 @@ bool LLMInference::startCompletion(const char* query) {
     const uint32_t contextSize = llama_n_ctx(_ctx);
     const int responseReserve = std::min<int>(256, std::max<int>(64, (int)contextSize / 8));
 
+    // Use the GGUF's native chat template and explicitly request the assistant
+    // generation prompt. This is the normal llama.cpp chat path; do not inject
+    // a fake "tools=[]" template variable because models interpret that field
+    // differently and it can suppress the assistant turn.
     auto templates = common_chat_templates_init(_model, _chatTemplate ? _chatTemplate : "");
     common_chat_templates_inputs inputs;
     inputs.use_jinja = true;
-    inputs.chat_template_kwargs["tools"] = "[]";
+    inputs.add_generation_prompt = true;
+    inputs.add_bos = false;
+    inputs.add_eos = false;
+    inputs.tools.clear();
+    inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_NONE;
+    inputs.enable_thinking = true;
 
     std::string prompt;
     int tokenCount = 0;
@@ -169,11 +171,15 @@ bool LLMInference::startCompletion(const char* query) {
         }
         inputs.messages = messages;
         try {
-            prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
+            const common_chat_params rendered = common_chat_templates_apply(templates.get(), inputs);
+            prompt = rendered.prompt;
+            LOGI("chat template=%s generation_prompt=%s prompt_chars=%d", 
+                 common_chat_templates_source(templates.get()).c_str(),
+                 inputs.add_generation_prompt ? "true" : "false",
+                 (int)prompt.size());
         } catch (const std::exception& error) {
             LOGE("Jinja chat template failed: %s", error.what());
             inputs.use_jinja = false;
-            inputs.chat_template_kwargs.clear();
             prompt = common_chat_templates_apply(templates.get(), inputs).prompt;
         }
 
@@ -233,8 +239,8 @@ std::string LLMInference::completionLoop() {
     const uint32_t contextSize = llama_n_ctx(_ctx);
     const int responseReserve = std::min<int>(256, std::max<int>(64, (int)contextSize / 8));
 
-    if (_nCtxUsed + responseReserve >= (int)contextSize) {
-        LOGI("Generation budget exhausted: used=%d ctx=%u reserve=%d", _nCtxUsed, contextSize, responseReserve);
+    if (_nCtxUsed + 1 >= (int)contextSize) {
+        LOGI("Generation context exhausted: used=%d ctx=%u", _nCtxUsed, contextSize);
         return "[EOG]";
     }
 
