@@ -14,27 +14,17 @@ static int countTokens(const llama_vocab* vocab, const std::string& text) {
     return n < 0 ? -n : n;
 }
 
+// Use llama.cpp's single-sequence helper instead of manually assigning KV
+// positions. The helper lets llama_decode track the next position from the
+// context memory, which is important on the 32-bit ARMv7 build.
 static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int requestedBatch) {
     if (tokens.empty()) return false;
     int batchSize = std::max(1, std::min(requestedBatch, 16));
     for (int start = 0; start < (int)tokens.size();) {
         int count = std::min(batchSize, (int)tokens.size() - start);
         while (true) {
-            llama_batch batch = llama_batch_init(count, 0, 1);
-            if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
-                llama_batch_free(batch);
-                return false;
-            }
-            for (int i = 0; i < count; ++i) {
-                const int index = start + i;
-                batch.token[i] = tokens[index];
-                batch.pos[i] = index;
-                batch.n_seq_id[i] = 1;
-                batch.seq_id[i][0] = 0;
-                batch.logits[i] = (index == (int)tokens.size() - 1);
-            }
+            llama_batch batch = llama_batch_get_one(tokens.data() + start, count);
             const int rc = llama_decode(ctx, batch);
-            llama_batch_free(batch);
             if (rc == 0) {
                 start += count;
                 break;
@@ -143,10 +133,6 @@ bool LLMInference::startCompletion(const char* query) {
     const uint32_t contextSize = llama_n_ctx(_ctx);
     const int responseReserve = std::min<int>(256, std::max<int>(64, (int)contextSize / 8));
 
-    // Use the GGUF's native chat template and explicitly request the assistant
-    // generation prompt. This is the normal llama.cpp chat path; do not inject
-    // a fake "tools=[]" template variable because models interpret that field
-    // differently and it can suppress the assistant turn.
     auto templates = common_chat_templates_init(_model, _chatTemplate ? _chatTemplate : "");
     common_chat_templates_inputs inputs;
     inputs.use_jinja = true;
@@ -173,7 +159,7 @@ bool LLMInference::startCompletion(const char* query) {
         try {
             const common_chat_params rendered = common_chat_templates_apply(templates.get(), inputs);
             prompt = rendered.prompt;
-            LOGI("chat template=%s generation_prompt=%s prompt_chars=%d", 
+            LOGI("chat template=%s generation_prompt=%s prompt_chars=%d",
                  common_chat_templates_source(templates.get()).c_str(),
                  inputs.add_generation_prompt ? "true" : "false",
                  (int)prompt.size());
@@ -237,7 +223,6 @@ bool LLMInference::_isValidUtf8(const char* response) {
 std::string LLMInference::completionLoop() {
     if (!_ctx || !_model || !_sampler) throw std::runtime_error("Native model is not initialized");
     const uint32_t contextSize = llama_n_ctx(_ctx);
-    const int responseReserve = std::min<int>(256, std::max<int>(64, (int)contextSize / 8));
 
     if (_nCtxUsed + 1 >= (int)contextSize) {
         LOGI("Generation context exhausted: used=%d ctx=%u", _nCtxUsed, contextSize);
@@ -254,19 +239,10 @@ std::string LLMInference::completionLoop() {
 
     llama_sampler_accept(_sampler, token);
 
-    llama_batch batch = llama_batch_init(1, 0, 1);
-    if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
-        llama_batch_free(batch);
-        throw std::runtime_error("llama.cpp could not allocate generation batch");
-    }
-    batch.token[0] = token;
-    batch.pos[0] = _nCtxUsed;
-    batch.n_seq_id[0] = 1;
-    batch.seq_id[0][0] = 0;
-    batch.logits[0] = true;
-
+    // Match the normal llama.cpp/SmolChat generation path: positions are
+    // automatically advanced by llama_decode instead of being manually set.
+    llama_batch batch = llama_batch_get_one(const_cast<llama_token*>(&token), 1);
     const int rc = llama_decode(_ctx, batch);
-    llama_batch_free(batch);
     if (rc != 0) throw std::runtime_error("llama_decode failed during token generation");
 
     _nCtxUsed++;
