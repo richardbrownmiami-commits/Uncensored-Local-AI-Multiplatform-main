@@ -14,26 +14,21 @@ static int countTokens(const llama_vocab* vocab, const std::string& text) {
     return n < 0 ? -n : n;
 }
 
-// Android ARMv7 can fail a large prompt decode even when the total prompt
-// fits the context. llama.cpp itself uses smaller batch views and retries
-// with a smaller batch after decode failure. Do the same here instead of
-// turning a native decode failure into an opaque Flutter exception.
+// ARMv7 reliability is more important than prompt throughput. llama.cpp supports
+// decoding a view of a larger batch, so start with a small batch and fall back
+// all the way to one token if the backend rejects a graph.
 static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int requestedBatch) {
     if (tokens.empty()) return false;
-    int batchSize = std::max(1, requestedBatch);
-    batchSize = std::min(batchSize, 32); // conservative for 32-bit Android
+    int batchSize = std::max(1, std::min(requestedBatch, 16));
 
     for (int start = 0; start < (int)tokens.size();) {
         int count = std::min(batchSize, (int)tokens.size() - start);
-        bool decoded = false;
-
-        while (!decoded) {
+        while (true) {
             llama_batch batch = llama_batch_init(count, 0, 1);
             if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
                 llama_batch_free(batch);
                 return false;
             }
-
             for (int i = 0; i < count; ++i) {
                 const int index = start + i;
                 batch.token[i] = tokens[index];
@@ -42,17 +37,13 @@ static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tok
                 batch.seq_id[i][0] = 0;
                 batch.logits[i] = (index == (int)tokens.size() - 1);
             }
-
             const int rc = llama_decode(ctx, batch);
             llama_batch_free(batch);
-
             if (rc == 0) {
-                decoded = true;
                 start += count;
                 break;
             }
-
-            LOGE("llama_decode prompt batch failed rc=%d start=%d count=%d", rc, start, count);
+            LOGE("prompt decode failed rc=%d start=%d count=%d", rc, start, count);
             if (count == 1) return false;
             count = std::max(1, count / 2);
         }
@@ -76,8 +67,11 @@ void LLMInference::loadModel(const char* modelPath, float minP, float temperatur
 
     llama_context_params ctxParams = llama_context_default_params();
     ctxParams.n_ctx = contextSize > 0 ? contextSize : 2048;
+    // Keep the public batch setting, but force a tiny physical ubatch on ARMv7.
+    // This avoids large transient graphs that can make llama_decode fail on
+    // 32-bit devices even when the model and context fit in RAM.
     ctxParams.n_batch = nBatch > 0 ? std::min<int>(nBatch, (int)ctxParams.n_ctx) : 128;
-    ctxParams.n_ubatch = std::min<uint32_t>(ctxParams.n_batch, 32);
+    ctxParams.n_ubatch = 1;
     ctxParams.n_threads = nThreads > 0 ? nThreads : 2;
     ctxParams.n_threads_batch = ctxParams.n_threads;
     ctxParams.no_perf = true;
@@ -205,13 +199,13 @@ bool LLMInference::startCompletion(const char* query) {
     if (written < 0) throw std::runtime_error("llama.cpp prompt tokenization failed");
     if (written != tokenCount) _promptTokens.resize((size_t)written);
 
-    const int batchSize = std::max(1, std::min<int>(32, (int)llama_n_batch(_ctx)));
+    const int batchSize = std::max(1, std::min<int>(16, (int)llama_n_batch(_ctx)));
     if (!decodePrompt(_ctx, _promptTokens, batchSize)) {
-        throw std::runtime_error("llama_decode failed while processing prompt; native batch was retried down to 1 token");
+        throw std::runtime_error("llama_decode failed while processing prompt; ARMv7 decoder reached batch size 1");
     }
 
     _nCtxUsed = (int)_promptTokens.size();
-    LOGI("Completion promptTokens=%d ctx=%u responseReserve=%d", _nCtxUsed, contextSize, responseReserve);
+    LOGI("Completion promptTokens=%d ctx=%u responseReserve=%d ubatch=1", _nCtxUsed, contextSize, responseReserve);
     return true;
 }
 
