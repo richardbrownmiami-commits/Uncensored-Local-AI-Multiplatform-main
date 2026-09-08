@@ -23,7 +23,7 @@ static bool decodePrompt(llama_context* ctx, const std::vector<llama_token>& tok
     for (int start = 0; start < (int)tokens.size();) {
         int count = std::min(batchSize, (int)tokens.size() - start);
         while (true) {
-            llama_batch batch = llama_batch_get_one(tokens.data() + start, count);
+            llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(tokens.data() + start), count);
             const int rc = llama_decode(ctx, batch);
             if (rc == 0) {
                 start += count;
