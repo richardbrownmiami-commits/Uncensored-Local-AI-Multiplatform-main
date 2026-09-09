@@ -14,14 +14,9 @@ static int countTokens(const llama_vocab* vocab, const std::string& text) {
     return n < 0 ? -n : n;
 }
 
-// Evaluate a single sequence using explicit token positions.  This avoids
-// relying on llama_batch_get_one() to infer KV positions across multiple
-// prompt chunks, which is especially important when a failed decode is
-// retried with a smaller work unit.
 static int decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int requestedBatch) {
     if (tokens.empty()) return -1;
     const int batchCapacity = std::max(1, requestedBatch);
-
     for (int start = 0; start < (int)tokens.size();) {
         int count = std::min(batchCapacity, (int)tokens.size() - start);
         while (true) {
@@ -33,19 +28,14 @@ static int decodePrompt(llama_context* ctx, const std::vector<llama_token>& toke
                 batch.seq_id[i][0] = 0;
                 batch.logits[i] = (i == count - 1) ? 1 : 0;
             }
-
             const int rc = llama_decode(ctx, batch);
             llama_batch_free(batch);
             if (rc == 0) {
                 start += count;
                 break;
             }
-
             LOGE("prompt decode failed rc=%d start=%d count=%d", rc, start, count);
             if (count == 1) return rc;
-            // llama_decode() restores the memory state for ordinary input
-            // validation/KV-slot failures, so retry the same positions with
-            // a smaller batch rather than advancing the sequence incorrectly.
             count = std::max(1, count / 2);
         }
     }
@@ -56,8 +46,6 @@ static int decodePrompt(llama_context* ctx, const std::vector<llama_token>& toke
 void LLMInference::loadModel(const char* modelPath, float minP, float temperature, bool storeChats,
                              long contextSize, const char* chatTemplate, int nThreads, int nBatch,
                              bool useMmap, bool useMlock) {
-    // mmap/mlock policy is controlled by the Flutter/device layer. llama.cpp's
-    // model loader remains the single implementation for all supported GGUFs.
     (void) useMmap;
     (void) useMlock;
     LOGI("loadModel path=%s ctx=%ld batch=%d threads=%d", modelPath, contextSize, nBatch, nThreads);
@@ -160,7 +148,6 @@ bool LLMInference::startCompletion(const char* query) {
 
     std::string prompt;
     int tokenCount = 0;
-
     while (true) {
         std::vector<common_chat_msg> messages;
         messages.reserve(_messages.size());
@@ -174,10 +161,7 @@ bool LLMInference::startCompletion(const char* query) {
         try {
             const common_chat_params rendered = common_chat_templates_apply(templates.get(), inputs);
             prompt = rendered.prompt;
-            LOGI("chat template=%s generation_prompt=%s prompt_chars=%d",
-                 common_chat_templates_source(templates.get()).c_str(),
-                 inputs.add_generation_prompt ? "true" : "false",
-                 (int)prompt.size());
+            LOGI("chat template=%s generation_prompt=%s prompt_chars=%d", common_chat_templates_source(templates.get()).c_str(), inputs.add_generation_prompt ? "true" : "false", (int)prompt.size());
         } catch (const std::exception& error) {
             LOGE("Jinja chat template failed: %s", error.what());
             inputs.use_jinja = false;
@@ -187,7 +171,6 @@ bool LLMInference::startCompletion(const char* query) {
         tokenCount = countTokens(vocab, prompt);
         if (tokenCount <= 0) throw std::runtime_error("llama.cpp could not tokenize the rendered chat prompt");
         if (tokenCount < (int)contextSize || _messages.size() <= 2) break;
-
         const size_t removeIndex = 1;
         if (_messages.size() <= removeIndex + 1) break;
         free(const_cast<char*>(_messages[removeIndex].role));
@@ -196,21 +179,16 @@ bool LLMInference::startCompletion(const char* query) {
         LOGI("Context trim: removed oldest turn; promptTokens=%d ctx=%u", tokenCount, contextSize);
     }
 
-    if (tokenCount >= (int)contextSize) {
-        throw std::runtime_error("rendered prompt exceeds the selected context size");
-    }
+    if (tokenCount >= (int)contextSize) throw std::runtime_error("rendered prompt exceeds the selected context size");
 
     _promptTokens.resize((size_t)tokenCount);
-    const int written = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(),
-                                       _promptTokens.data(), tokenCount, true, true);
+    const int written = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(), _promptTokens.data(), tokenCount, true, true);
     if (written < 0) throw std::runtime_error("llama.cpp prompt tokenization failed");
     if (written != tokenCount) _promptTokens.resize((size_t)written);
 
     const int batchSize = std::max(1, (int)llama_n_batch(_ctx));
     const int decodeRc = decodePrompt(_ctx, _promptTokens, batchSize);
-    if (decodeRc != 0) {
-        throw std::runtime_error("llama_decode failed while processing the selected GGUF (rc=" + std::to_string(decodeRc) + ")");
-    }
+    if (decodeRc != 0) throw std::runtime_error("llama_decode failed while processing the selected GGUF (rc=" + std::to_string(decodeRc) + ")");
 
     _nCtxUsed = (int)_promptTokens.size();
     LOGI("Completion promptTokens=%d ctx=%u batch=%d", _nCtxUsed, contextSize, batchSize);
@@ -246,17 +224,16 @@ std::string LLMInference::completionLoop() {
     }
 
     const auto start = ggml_time_us();
+    // llama_sampler_sample() accepts the sampled token itself in llama.cpp's
+    // sampler chain. Do not call llama_sampler_accept() a second time here.
     const llama_token token = llama_sampler_sample(_sampler, _ctx, -1);
+    LOGI("sample token=%d piece='%s' ctx=%d", (int)token, common_token_to_piece(_ctx, token, true).c_str(), _nCtxUsed);
 
     if (llama_vocab_is_eog(llama_model_get_vocab(_model), token)) {
         if (_storeChats) addChatMessage(_response.c_str(), "assistant");
         return "[EOG]";
     }
 
-    llama_sampler_accept(_sampler, token);
-
-    // Use an explicit position for generated tokens so the native engine and
-    // KV cache always agree on the sequence position.
     llama_batch batch = llama_batch_init(1, 0, 1);
     batch.token[0] = token;
     batch.pos[0] = _nCtxUsed;
@@ -265,9 +242,7 @@ std::string LLMInference::completionLoop() {
     batch.logits[0] = 1;
     const int rc = llama_decode(_ctx, batch);
     llama_batch_free(batch);
-    if (rc != 0) {
-        throw std::runtime_error("llama_decode failed during token generation (rc=" + std::to_string(rc) + ")");
-    }
+    if (rc != 0) throw std::runtime_error("llama_decode failed during token generation (rc=" + std::to_string(rc) + ")");
 
     _nCtxUsed++;
     const auto end = ggml_time_us();
