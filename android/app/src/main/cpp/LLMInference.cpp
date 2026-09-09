@@ -14,22 +14,18 @@ static int countTokens(const llama_vocab* vocab, const std::string& text) {
     return n < 0 ? -n : n;
 }
 
+// Let llama.cpp assign/validate KV positions from its memory state instead of
+// manually manufacturing positions. This is the same batch progression used
+// by llama.cpp's simple example and avoids rc=-1 when a model's memory layout
+// has architecture-specific position handling.
 static int decodePrompt(llama_context* ctx, const std::vector<llama_token>& tokens, int requestedBatch) {
     if (tokens.empty()) return -1;
     const int batchCapacity = std::max(1, requestedBatch);
     for (int start = 0; start < (int)tokens.size();) {
         int count = std::min(batchCapacity, (int)tokens.size() - start);
         while (true) {
-            llama_batch batch = llama_batch_init(count, 0, 1);
-            for (int i = 0; i < count; ++i) {
-                batch.token[i] = tokens[(size_t)start + i];
-                batch.pos[i] = start + i;
-                batch.n_seq_id[i] = 1;
-                batch.seq_id[i][0] = 0;
-                batch.logits[i] = (i == count - 1) ? 1 : 0;
-            }
+            llama_batch batch = llama_batch_get_one(tokens.data() + start, (size_t)count);
             const int rc = llama_decode(ctx, batch);
-            llama_batch_free(batch);
             if (rc == 0) {
                 start += count;
                 break;
@@ -224,24 +220,21 @@ std::string LLMInference::completionLoop() {
     }
 
     const auto start = ggml_time_us();
-    // llama_sampler_sample() accepts the sampled token itself in llama.cpp's
-    // sampler chain. Do not call llama_sampler_accept() a second time here.
     const llama_token token = llama_sampler_sample(_sampler, _ctx, -1);
-    LOGI("sample token=%d piece='%s' ctx=%d", (int)token, common_token_to_piece(_ctx, token, true).c_str(), _nCtxUsed);
+    const std::string piece = common_token_to_piece(_ctx, token, true);
+    LOGI("sample token=%d piece='%s' ctx=%d", (int)token, piece.c_str(), _nCtxUsed);
 
     if (llama_vocab_is_eog(llama_model_get_vocab(_model), token)) {
         if (_storeChats) addChatMessage(_response.c_str(), "assistant");
         return "[EOG]";
     }
 
-    llama_batch batch = llama_batch_init(1, 0, 1);
-    batch.token[0] = token;
-    batch.pos[0] = _nCtxUsed;
-    batch.n_seq_id[0] = 1;
-    batch.seq_id[0][0] = 0;
-    batch.logits[0] = 1;
+    // Use llama_batch_get_one for the next token too. llama.cpp then derives
+    // the next KV position from its memory instead of relying on a manually
+    // maintained position counter. This is important for recurrent/hybrid
+    // GGUF architectures as well as ordinary transformers.
+    llama_batch batch = llama_batch_get_one(&token, 1);
     const int rc = llama_decode(_ctx, batch);
-    llama_batch_free(batch);
     if (rc != 0) throw std::runtime_error("llama_decode failed during token generation (rc=" + std::to_string(rc) + ")");
 
     _nCtxUsed++;
@@ -249,7 +242,6 @@ std::string LLMInference::completionLoop() {
     _responseGenerationTime += end - start;
     _responseNumTokens++;
 
-    const std::string piece = common_token_to_piece(_ctx, token, true);
     if (!piece.empty()) _cacheResponseTokens += piece;
 
     if (_isValidUtf8(_cacheResponseTokens.c_str())) {
