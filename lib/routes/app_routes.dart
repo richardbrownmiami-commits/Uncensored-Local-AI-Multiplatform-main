@@ -8,6 +8,7 @@ import '../screens/api_endpoints_screen.dart';
 import '../screens/logs_screen.dart';
 import '../screens/prompt_window_screen.dart';
 import '../screens/ai_core_files_screen.dart';
+import '../screens/model_settings_screen.dart';
 
 class AppRoutes {
   static const splash = '/splash';
@@ -18,6 +19,7 @@ class AppRoutes {
   static const logs = '/logs';
   static const promptWindow = '/prompt-window';
   static const aiCoreFiles = '/ai-core-files';
+  static const modelSettings = '/model-settings';
 
   static final pages = [
     GetPage(name: splash, page: () => const SplashScreen()),
@@ -28,5 +30,6 @@ class AppRoutes {
     GetPage(name: logs, page: () => const LogsScreen(), transition: Transition.rightToLeft),
     GetPage(name: promptWindow, page: () => const PromptWindowScreen(), transition: Transition.rightToLeft),
     GetPage(name: aiCoreFiles, page: () => const AiCoreFilesScreen(), transition: Transition.rightToLeft),
+    GetPage(name: modelSettings, page: () => ModelSettingsScreen(modelFilename: Get.arguments as String), transition: Transition.rightToLeft),
   ];
 }
