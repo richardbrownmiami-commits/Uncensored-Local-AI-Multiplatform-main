@@ -11,6 +11,9 @@ class AiModelInfo {
   final String systemPrompt;
   final bool recommended;
   final List<String> capabilities;
+  final int minContextSize;
+  final int maxContextSize;
+  final int minTokens;
 
   const AiModelInfo({
     required this.id,
@@ -24,6 +27,9 @@ class AiModelInfo {
     required this.systemPrompt,
     this.recommended = false,
     this.capabilities = const <String>[],
+    this.minContextSize = 2048,
+    this.maxContextSize = 8192,
+    this.minTokens = 32000,
   });
 
   /// Metadata for the model files already present on the user's device.
@@ -33,42 +39,68 @@ class AiModelInfo {
     List<String> capabilities = const <String>['chat'];
     int minRamGb = 1;
     String badge = 'LOCAL';
+    int minContextSize = 2048;
+    int maxContextSize = 8192;
+    int minTokens = 32000;
 
     if (lower == 'llama-3.2-1b-instruct-q5_k_m.gguf') {
       name = 'Llama 3.2 1B Instruct Q5_K_M';
       minRamGb = 2;
+      minContextSize = 2048;
+      maxContextSize = 8192;
     } else if (lower == 'llama-3.2-1b-instruct-q4_k_s.gguf') {
       name = 'Llama 3.2 1B Instruct Q4_K_S';
       minRamGb = 2;
+      minContextSize = 2048;
+      maxContextSize = 8192;
     } else if (lower == 'jarvis-0.5b.q8_0.gguf') {
       name = 'Jarvis 0.5B Q8_0';
       minRamGb = 2;
+      minContextSize = 2048;
+      maxContextSize = 4096;
     } else if (lower == 'lfm2.5-350m.gguf') {
       name = 'LFM2.5 350M';
       minRamGb = 1;
       capabilities = const <String>['chat', 'tools', 'structured-json'];
       badge = 'LOCAL · TOOLS';
+      minContextSize = 2048;
+      maxContextSize = 4096;
     } else if (lower == 'qwen3.5-0.8b-abliterated-huihui.gguf') {
       name = 'Qwen3.5 0.8B Abliterated';
       minRamGb = 2;
       capabilities = const <String>['chat', 'tools', 'vision', 'image-input'];
       badge = 'LOCAL · VISION · TOOLS';
+      minContextSize = 8192;
+      maxContextSize = 32768;
     } else if (lower == 'osmosis-structure-0.6b-q4_k_m.gguf') {
       name = 'Osmosis-Structure 0.6B Q4_K_M';
       minRamGb = 1;
       capabilities = const <String>['chat', 'structured-json'];
       badge = 'LOCAL · JSON';
+      minContextSize = 2048;
+      maxContextSize = 8192;
     } else if (lower == 'smollm2-360m-instruct-q8_0-3.gguf') {
       name = 'SmolLM2 360M Instruct Q8_0';
       minRamGb = 1;
+      minContextSize = 2048;
+      maxContextSize = 4096;
     } else if (lower == 'qwen3_0_6b_mixed_int4.litertlm') {
       name = 'Qwen3 0.6B Mixed INT4 (LiteRT-LM)';
       minRamGb = 1;
       capabilities = const <String>['chat', 'tools', 'structured-json', 'litert-lm'];
       badge = 'LOCAL · LITERT-LM · TOOLS';
+      minContextSize = 2048;
+      maxContextSize = 8192;
     } else if (lower == 'smollm2-135m-instruct.q8_0.gguf') {
       name = 'SmolLM2 135M Instruct Q8_0';
       minRamGb = 1;
+      minContextSize = 2048;
+      maxContextSize = 4096;
+    } else if (lower == 'gemma-2-2b.gguf') {
+      name = 'Gemma 2 2B';
+      minRamGb = 2;
+      minContextSize = 4096;
+      maxContextSize = 8192;
     }
 
     return AiModelInfo(
@@ -82,6 +114,9 @@ class AiModelInfo {
       badge: badge,
       systemPrompt: 'You are a helpful AI assistant.',
       capabilities: capabilities,
+      minContextSize: minContextSize,
+      maxContextSize: maxContextSize,
+      minTokens: minTokens,
     );
   }
 
@@ -98,6 +133,9 @@ class AiModelInfo {
       systemPrompt: json['systemPrompt'] as String? ?? '',
       recommended: json['recommended'] as bool? ?? false,
       capabilities: (json['capabilities'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const <String>[],
+      minContextSize: json['minContextSize'] as int? ?? 2048,
+      maxContextSize: json['maxContextSize'] as int? ?? 8192,
+      minTokens: json['minTokens'] as int? ?? 32000,
     );
   }
 
@@ -113,6 +151,9 @@ class AiModelInfo {
         'systemPrompt': systemPrompt,
         'recommended': recommended,
         'capabilities': capabilities,
+        'minContextSize': minContextSize,
+        'maxContextSize': maxContextSize,
+        'minTokens': minTokens,
       };
 
   bool get isUncensored => label == 'UNCENSORED';
