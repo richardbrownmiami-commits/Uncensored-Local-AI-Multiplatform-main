@@ -2,15 +2,18 @@ import 'package:get/get.dart';
 import 'package:hive/hive.dart';
 
 import '../models/chat_model.dart';
+import '../models/ai_model_info.dart';
 
 /// Persistence layer for chats and editable AI runtime configuration.
 class ChatStorageService extends GetxService {
   late Box<ChatModel> _chatsBox;
   late Box _settingsBox;
+  late Box _modelSettingsBox;
 
   Future<ChatStorageService> init() async {
     _chatsBox = Hive.box<ChatModel>('chats');
     _settingsBox = Hive.box('settings');
+    _modelSettingsBox = Hive.box('model_settings');
     return this;
   }
 
@@ -70,4 +73,28 @@ class ChatStorageService extends GetxService {
   String getAiCoreFile(String name) => _settingsBox.get('ai_core_$name', defaultValue: '') as String;
   Future<void> setAiCoreFile(String name, String value) async => _settingsBox.put('ai_core_$name', value);
   Future<void> resetAiCoreFile(String name) async => _settingsBox.delete('ai_core_$name');
+
+  // New: Model-specific settings
+  Map<String, dynamic> getModelSettings(String modelFilename) {
+    return _modelSettingsBox.get(modelFilename, defaultValue: {}) as Map<String, dynamic>;
+  }
+
+  void saveModelSettings(String modelFilename, Map<String, dynamic> settings) {
+    _modelSettingsBox.put(modelFilename, settings);
+  }
+
+  Map<String, dynamic> getAdjustedSettings(String modelFilename, AiModelInfo model) {
+    final savedSettings = getModelSettings(modelFilename);
+    final adjustedSettings = Map<String, dynamic>.from(savedSettings);
+
+    // Auto-adjust contextSize to meet model minimums
+    adjustedSettings['contextSize'] = (adjustedSettings['contextSize'] as int? ?? model.minContextSize)
+        .clamp(model.minContextSize, model.maxContextSize);
+
+    // Auto-adjust tokenLimit to meet model minimums
+    adjustedSettings['tokenLimit'] = (adjustedSettings['tokenLimit'] as int? ?? model.minTokens)
+        .clamp(model.minTokens, model.minTokens * 2);
+
+    return adjustedSettings;
+  }
 }
