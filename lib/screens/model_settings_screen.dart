@@ -8,7 +8,7 @@ import '../services/model_manager.dart';
 class ModelSettingsScreen extends StatefulWidget {
   final String modelFilename;
 
-  const ModelSettingsScreen({Key? key, required this.modelFilename}) : super(key: key);
+  const ModelSettingsScreen({Key? key, this.modelFilename = ''}) : super(key: key);
 
   @override
   _ModelSettingsScreenState createState() => _ModelSettingsScreenState();
@@ -32,11 +32,17 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
   Future<void> _loadModelInfo() async {
     setState(() => _isLoading = true);
     try {
-      _modelInfo = _modelManager.catalog.firstWhere(
-        (m) => m.filename == widget.modelFilename,
-        orElse: () => AiModelInfo.fromLocalFilename(widget.modelFilename),
-      );
-      _currentSettings = _storage.getAdjustedSettings(widget.modelFilename, _modelInfo);
+      if (widget.modelFilename.isEmpty && _modelManager.catalog.isNotEmpty) {
+        _modelInfo = _modelManager.catalog.first;
+      } else if (widget.modelFilename.isNotEmpty) {
+        _modelInfo = _modelManager.catalog.firstWhere(
+          (m) => m.filename == widget.modelFilename,
+          orElse: () => AiModelInfo.fromLocalFilename(widget.modelFilename),
+        );
+      } else {
+        throw Exception('No models available');
+      }
+      _currentSettings = _storage.getAdjustedSettings(_modelInfo.filename, _modelInfo);
     } catch (e) {
       Get.snackbar('Error', 'Failed to load model info: $e', snackPosition: SnackPosition.BOTTOM);
     } finally {
@@ -167,7 +173,7 @@ class _ModelSettingsScreenState extends State<ModelSettingsScreen> {
               width: double.infinity,
               child: ElevatedButton(
                 onPressed: () {
-                  _storage.saveModelSettings(widget.modelFilename, _currentSettings);
+                  _storage.saveModelSettings(_modelInfo.filename, _currentSettings);
                   Get.snackbar('Success', 'Model settings saved!', snackPosition: SnackPosition.BOTTOM);
                 },
                 child: const Text('Save Settings'),
