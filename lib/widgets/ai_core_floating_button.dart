@@ -2,9 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
 /// Always-visible entry point for the model configuration/prompt workspace.
-/// The previous implementation registered the screens as routes but did not
-/// expose them from the main Android chat UI, making the fields effectively
-/// undiscoverable.
+/// The menu also exposes the SmolChat-inspired local inference control center.
 class AiCoreFloatingButton extends StatelessWidget {
   const AiCoreFloatingButton({super.key});
 
@@ -20,10 +18,19 @@ class AiCoreFloatingButton extends StatelessWidget {
           child: PopupMenuButton<String>(
             tooltip: 'AI controls',
             onSelected: (value) {
+              if (value == 'smolchat') Get.toNamed('/smolchat-control');
               if (value == 'core') Get.toNamed('/ai-core-files');
               if (value == 'prompt') Get.toNamed('/prompt-window');
             },
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'smolchat',
+                child: ListTile(
+                  leading: Icon(Icons.bolt_rounded),
+                  title: Text('Local AI Control Center'),
+                  subtitle: Text('GGUF, model loading and runtime settings'),
+                ),
+              ),
               PopupMenuItem(
                 value: 'core',
                 child: ListTile(
