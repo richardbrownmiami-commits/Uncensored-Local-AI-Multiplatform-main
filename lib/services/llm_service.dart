@@ -10,6 +10,8 @@ import 'chat_storage_service.dart';
 import 'log_service.dart';
 import 'prompt_context_service.dart';
 import 'skill_service.dart';
+import '../models/ai_model_info.dart';
+import '../services/model_manager.dart';
 
 /// Local LLM service.
 ///
@@ -69,28 +71,35 @@ class LlmService extends GetxService {
     loadingProgress.value = 0.05;
     loadingStatusMsg.value = 'Loading $filename with native llama.cpp...';
     try {
+      final storage = Get.find<ChatStorageService>();
+      final modelManager = Get.find<ModelManager>();
+      final modelInfo = modelManager.catalog.firstWhere(
+        (m) => m.filename == filename,
+        orElse: () => AiModelInfo.fromLocalFilename(filename),
+      );
+      
+      // Load model-specific settings and auto-adjust
+      final modelSettings = storage.getAdjustedSettings(filename, modelInfo);
+      final contextSize = modelSettings['contextSize'] as int;
+      final cpuThreads = modelSettings['cpuThreads'] as int? ?? storage.cpuThreads;
+      final batchSize = modelSettings['batchSize'] as int? ?? storage.batchSize;
+      
       final size = await file.length();
       log?.info('Native load: $filename (${(size / (1024 * 1024)).toStringAsFixed(1)} MB)', source: 'LLM');
       if (_useNativeAndroid) {
-        final storage = Get.find<ChatStorageService>();
-        final context = storage.contextSize.clamp(2048, 8192);
-        final threads = storage.cpuThreads.clamp(1, 16);
-        final batch = storage.batchSize.clamp(32, 1024);
-        final raw = await _native.invokeMethod<dynamic>('load', {
+        await _native.invokeMethod<dynamic>('load', {
           'path': path,
-          'contextSize': context,
-          'threads': threads,
-          'batch': batch,
+          'contextSize': contextSize,
+          'threads': cpuThreads.clamp(1, 16),
+          'batch': batchSize.clamp(32, 1024),
           'minP': 0.05,
           'temperature': storage.defaultTemperature,
           'useMmap': true,
           'useMlock': false,
           'storeChats': false,
         });
-        final response = raw is Map ? Map<Object?, Object?>.from(raw) : const <Object?, Object?>{};
-        if (response['ok'] != true) throw Exception(response['message']?.toString() ?? 'Native SmolChat llama.cpp failed to load the GGUF.');
       } else {
-        await _loadLlamadart(path, filename, log);
+        await _loadLlamadart(path, filename, log, contextSize: contextSize);
       }
       if (_loadingCancelled) { await unloadModel(); return; }
       loadingProgress.value = 1.0;
@@ -109,7 +118,7 @@ class LlmService extends GetxService {
     }
   }
 
-  Future<void> _loadLlamadart(String path, String filename, LogService? log) async {
+  Future<void> _loadLlamadart(String path, String filename, LogService? log, {int contextSize = 2048}) async {
     _backend = LlamaBackend();
     _engine = LlamaEngine(_backend!);
     final storage = Get.find<ChatStorageService>();
@@ -120,14 +129,14 @@ class LlmService extends GetxService {
       default: backend = GpuBackend.cpu;
     }
     final params = ModelParams(
-      contextSize: 2048,
+      contextSize: contextSize,
       gpuLayers: storage.gpuLayers,
       preferredBackend: backend,
       numberOfThreads: Platform.numberOfProcessors > 4 ? 4 : 0,
       useMmap: true,
       useMlock: false,
     );
-    log?.info('Runtime config: llamadart desktop/native backend, context=2048 mmap=true', source: 'LLM');
+    log?.info('Runtime config: llamadart desktop/native backend, context=$contextSize mmap=true', source: 'LLM');
     await _engine!.loadModel(path, modelParams: params).timeout(const Duration(minutes: 10));
   }
 

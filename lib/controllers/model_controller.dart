@@ -10,6 +10,7 @@ import '../services/model_manager.dart';
 import '../services/llm_service.dart';
 import '../services/chat_storage_service.dart';
 import '../services/log_service.dart';
+import '../routes/app_routes.dart';
 
 class ModelController extends GetxController {
   final ModelManager _manager = Get.find<ModelManager>();
@@ -100,6 +101,15 @@ class ModelController extends GetxController {
           return;
         }
       }
+
+      // Get model info and auto-adjust settings
+      final modelInfo = _manager.catalog.firstWhere(
+        (m) => m.filename == filename,
+        orElse: () => AiModelInfo.fromLocalFilename(filename),
+      );
+      final adjustedSettings = _storage.getAdjustedSettings(filename, modelInfo);
+      _storage.saveModelSettings(filename, adjustedSettings);
+
       await _llm.loadModel(path);
       if (!_llm.isLoaded.value && loadingModelFilename.value == null) return;
       selectedModelFilename.value = filename;
@@ -348,5 +358,10 @@ class ModelController extends GetxController {
     ));
     final sizeStr = sizeGb > 0 ? ' (${sizeGb} GB)' : '';
     Get.snackbar('Model Added', '$name$sizeStr added to your library!', snackPosition: SnackPosition.BOTTOM);
+  }
+
+  // New: Open model settings screen
+  Future<void> openModelSettings(String filename) async {
+    await Get.toNamed(AppRoutes.modelSettings, arguments: filename);
   }
 }
