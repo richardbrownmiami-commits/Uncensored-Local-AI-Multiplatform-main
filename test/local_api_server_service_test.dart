@@ -14,7 +14,7 @@ void main() {
   late Directory tempDir;
   late LocalApiServerService apiServer;
 
-  setUp(() async {
+  setUpAll(() async {
     tempDir = await Directory.systemTemp.createTemp('portable-ai-api-test-');
     Hive.init(tempDir.path);
 
@@ -31,7 +31,7 @@ void main() {
     apiServer = Get.put<LocalApiServerService>(LocalApiServerService());
   });
 
-  tearDown(() async {
+  tearDownAll(() async {
     await apiServer.stop();
     Get.reset();
     await Hive.close();
