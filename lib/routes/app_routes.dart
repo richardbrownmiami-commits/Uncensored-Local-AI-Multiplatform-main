@@ -9,6 +9,7 @@ import '../screens/logs_screen.dart';
 import '../screens/prompt_window_screen.dart';
 import '../screens/ai_core_files_screen.dart';
 import '../screens/smolchat_control_screen.dart';
+import '../screens/model_settings_screen.dart';
 
 class AppRoutes {
   static const splash = '/splash';
@@ -20,6 +21,7 @@ class AppRoutes {
   static const promptWindow = '/prompt-window';
   static const aiCoreFiles = '/ai-core-files';
   static const smolchatControl = '/smolchat-control';
+  static const modelSettings = '/model-settings';
 
   static final pages = [
     GetPage(name: splash, page: () => const SplashScreen()),
@@ -31,5 +33,6 @@ class AppRoutes {
     GetPage(name: promptWindow, page: () => const PromptWindowScreen(), transition: Transition.rightToLeft),
     GetPage(name: aiCoreFiles, page: () => const AiCoreFilesScreen(), transition: Transition.rightToLeft),
     GetPage(name: smolchatControl, page: () => const SmolChatControlScreen(), transition: Transition.rightToLeft),
+    GetPage(name: modelSettings, page: () => const ModelSettingsScreen(), transition: Transition.rightToLeft),
   ];
 }
