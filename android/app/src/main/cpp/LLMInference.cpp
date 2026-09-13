@@ -24,7 +24,9 @@ static int decodePrompt(llama_context* ctx, const std::vector<llama_token>& toke
     for (int start = 0; start < (int)tokens.size();) {
         int count = std::min(batchCapacity, (int)tokens.size() - start);
         while (true) {
-            llama_batch batch = llama_batch_get_one(tokens.data() + start, (size_t)count);
+            // Create a mutable copy of the token slice for llama_batch_get_one
+            std::vector<llama_token> tokensBatch(tokens.begin() + start, tokens.begin() + start + count);
+            llama_batch batch = llama_batch_get_one(tokensBatch.data(), (size_t)count);
             const int rc = llama_decode(ctx, batch);
             if (rc == 0) {
                 start += count;
@@ -233,7 +235,9 @@ std::string LLMInference::completionLoop() {
     // the next KV position from its memory instead of relying on a manually
     // maintained position counter. This is important for recurrent/hybrid
     // GGUF architectures as well as ordinary transformers.
-    llama_batch batch = llama_batch_get_one(&token, 1);
+    // Create a mutable copy for llama_batch_get_one
+    llama_token tokenCopy = token;
+    llama_batch batch = llama_batch_get_one(&tokenCopy, 1);
     const int rc = llama_decode(_ctx, batch);
     if (rc != 0) throw std::runtime_error("llama_decode failed during token generation (rc=" + std::to_string(rc) + ")");
 
