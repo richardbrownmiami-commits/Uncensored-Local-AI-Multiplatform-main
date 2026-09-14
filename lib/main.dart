@@ -26,7 +26,7 @@ Future<void> main() async {
     };
 
     PlatformDispatcher.instance.onError = (error, stack) {
-      debugPrint('PlatformError: $error\\n$stack');
+      debugPrint('PlatformError: $error\n$stack');
       return true;
     };
 
@@ -40,11 +40,13 @@ Future<void> main() async {
     await Hive.openBox<ChatModel>('chats');
     await Hive.openBox('settings');
     await Hive.openBox('models_meta');
+    // ChatStorageService uses this box for per-model runtime settings.
+    await Hive.openBox('model_settings');
 
     final themeController = Get.put(ThemeController());
     runApp(PortableAIApp(themeController: themeController));
   }, (error, stack) {
-    debugPrint('Unhandled error: $error\\n$stack');
+    debugPrint('Unhandled error: $error\n$stack');
   });
 }
 
