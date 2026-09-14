@@ -40,6 +40,7 @@ Future<void> main() async {
     await Hive.openBox<ChatModel>('chats');
     await Hive.openBox('settings');
     await Hive.openBox('models_meta');
+    await Hive.openBox('model_settings');
 
     final themeController = Get.put(ThemeController());
     runApp(PortableAIApp(themeController: themeController));
