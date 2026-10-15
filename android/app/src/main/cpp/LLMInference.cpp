@@ -44,13 +44,17 @@ static int decodePrompt(llama_context* ctx, const std::vector<llama_token>& toke
 void LLMInference::loadModel(const char* modelPath, float minP, float temperature, bool storeChats,
                              long contextSize, const char* chatTemplate, int nThreads, int nBatch,
                              bool useMmap, bool useMlock) {
-    (void) useMmap;
-    (void) useMlock;
-    LOGI("loadModel path=%s ctx=%ld batch=%d threads=%d", modelPath, contextSize, nBatch, nThreads);
+    (void) useMlock; // keep reference for older builds
+    LOGI("loadModel path=%s ctx=%ld batch=%d threads=%d useMmap=%d useMlock=%d", modelPath, contextSize, nBatch, nThreads, useMmap ? 1 : 0, useMlock ? 1 : 0);
     llama_backend_init();
 
     llama_model_params modelParams = llama_model_default_params();
     modelParams.n_gpu_layers = 0;
+    // Respect the mmap/mlock preferences so large models can be memory-mapped when supported.
+    // This reduces peak RAM usage during load on constrained devices.
+    modelParams.use_mmap = useMmap ? 1 : 0;
+    modelParams.use_mlock = useMlock ? 1 : 0;
+
     _model = llama_model_load_from_file(modelPath, modelParams);
     if (!_model) throw std::runtime_error("llama.cpp failed to load GGUF model");
 
